@@ -27,6 +27,10 @@ from .loaders import FunctionLoader as FunctionLoader
 from .loaders import ModuleLoader as ModuleLoader
 from .loaders import PackageLoader as PackageLoader
 from .loaders import PrefixLoader as PrefixLoader
+from .meta import analyze_template_dependencies as analyze_template_dependencies
+from .meta import DependencyIssue as DependencyIssue
+from .meta import TemplateDependencyGraph as TemplateDependencyGraph
+from .meta import TemplateReference as TemplateReference
 from .runtime import ChainableUndefined as ChainableUndefined
 from .runtime import DebugUndefined as DebugUndefined
 from .runtime import make_logging_undefined as make_logging_undefined

@@ -13,6 +13,11 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Add ``meta.analyze_template_dependencies`` to statically build the
+    dependency graph of a template (``extends``, ``include``,
+    ``import`` and ``from import``) without rendering. Reports
+    loader origins, line numbers, dynamic references, missing templates,
+    and cycles.
 
 
 Version 3.1.6
