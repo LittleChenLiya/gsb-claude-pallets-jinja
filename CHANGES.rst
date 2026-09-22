@@ -13,6 +13,15 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Add :func:`jinja2.meta.analyze_dependencies`, which returns a static
+    dependency graph for an entry template and environment without rendering
+    or evaluating anything. Edges cover ``extends``, ``include``,
+    ``import`` and ``from ... import``, with reference type, line number,
+    loader origin and a source summary. Constant include lists resolve to
+    the first existing template using the loader lookup order, dynamic name
+    expressions are reported as unresolved references, missing templates
+    are listed with an ``ignore missing`` severity, and dependency cycles
+    are reported as closed loops.
 
 
 Version 3.1.6

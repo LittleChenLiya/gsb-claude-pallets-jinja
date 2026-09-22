@@ -917,3 +917,34 @@ returned by the :meth:`Environment.parse` method.
 .. autofunction:: jinja2.meta.find_undeclared_variables
 
 .. autofunction:: jinja2.meta.find_referenced_templates
+
+.. autofunction:: jinja2.meta.analyze_dependencies
+
+The dependency graph returned by analyze_dependencies is represented by
+the following objects. The analysis only reads template sources through the
+loader and parses them; it never renders a template or evaluates filters,
+globals or user expressions.
+
+.. autoclass:: jinja2.meta.DependencyGraph
+    :members:
+
+.. autoclass:: jinja2.meta.DependencyEdge
+    :members:
+
+.. autoclass:: jinja2.meta.DependencyType
+    :members:
+
+.. autoclass:: jinja2.meta.TemplateInfo
+    :members:
+
+.. autoclass:: jinja2.meta.TemplateDependency
+    :members:
+
+.. autoclass:: jinja2.meta.DynamicReference
+    :members:
+
+.. autoclass:: jinja2.meta.MissingTemplate
+    :members:
+
+.. autoclass:: jinja2.meta.TemplateAnalysisError
+    :members:
