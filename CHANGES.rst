@@ -10,6 +10,10 @@ Unreleased
 -   Update minimum Babel version to >= 2.17.
 -   Deprecate the ``__version__`` attribute. Use feature detection or
     ``importlib.metadata.version("jinja2")`` instead.
+-   Add ``Template.generate_with_budget`` and
+    ``Template.generate_async_with_budget``, which stream output like
+    ``generate`` but stop and raise ``ByteBudgetExceeded`` once the
+    delivered output would exceed a UTF-8 byte budget.
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.

@@ -215,6 +215,10 @@ useful if you want to dig deeper into Jinja or :ref:`develop extensions
 
     .. automethod:: generate_async([context])
 
+    .. automethod:: generate_with_budget(byte_budget, [context])
+
+    .. automethod:: generate_async_with_budget(byte_budget, [context])
+
 
 .. autoclass:: jinja2.environment.TemplateStream()
     :members: disable_buffering, enable_buffering, dump
@@ -633,6 +637,9 @@ Exceptions
         file system (most likely utf-8, or mbcs on Windows systems).
 
 .. autoexception:: jinja2.TemplateRuntimeError
+
+.. autoexception:: jinja2.ByteBudgetExceeded
+    :members: limit, delivered, rejected
 
 .. autoexception:: jinja2.TemplateAssertionError
 

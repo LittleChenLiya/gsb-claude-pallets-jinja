@@ -150,6 +150,27 @@ class TemplateRuntimeError(TemplateError):
     """
 
 
+class ByteBudgetExceeded(TemplateRuntimeError):
+    """Raised by the budgeted generate methods when delivering the next
+    output chunk would exceed the configured UTF-8 byte budget.
+
+    .. versionadded:: 3.2
+    """
+
+    def __init__(self, limit: int, delivered: int, rejected: int) -> None:
+        super().__init__(
+            f"output byte budget exceeded: limit={limit},"
+            f" delivered={delivered}, rejected={rejected}"
+        )
+        #: The configured budget in bytes.
+        self.limit = limit
+        #: Number of UTF-8 bytes already delivered to the caller.
+        self.delivered = delivered
+        #: UTF-8 length of the chunk that was refused.  The chunk itself is
+        #: intentionally not stored to avoid leaking template output.
+        self.rejected = rejected
+
+
 class UndefinedError(TemplateRuntimeError):
     """Raised if a template tries to operate on :class:`Undefined`."""
 

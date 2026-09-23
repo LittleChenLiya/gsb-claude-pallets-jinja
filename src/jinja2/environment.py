@@ -3,6 +3,7 @@ options.
 """
 
 import os
+import sys
 import typing
 import typing as t
 import weakref
@@ -34,6 +35,7 @@ from .defaults import NEWLINE_SEQUENCE
 from .defaults import TRIM_BLOCKS
 from .defaults import VARIABLE_END_STRING
 from .defaults import VARIABLE_START_STRING
+from .exceptions import ByteBudgetExceeded
 from .exceptions import TemplateNotFound
 from .exceptions import TemplateRuntimeError
 from .exceptions import TemplatesNotFound
@@ -1130,6 +1132,71 @@ class Environment:
         return ChainMap(d, self.globals)
 
 
+def _validate_byte_budget(byte_budget: int) -> int:
+    if isinstance(byte_budget, bool) or not isinstance(byte_budget, int):
+        raise TypeError(
+            f"byte_budget must be an int, got {type(byte_budget).__name__!r}"
+        )
+
+    if byte_budget < 0:
+        raise ValueError("byte_budget must be non-negative")
+
+    return byte_budget
+
+
+def _budgeted_generate(
+    gen: t.Generator[str, None, None], byte_budget: int
+) -> t.Iterator[str]:
+    """Wrap a sync generate iterator with a UTF-8 byte budget.  The budget
+    state is local to this wrapper, so concurrent renders sharing one
+    environment never affect each other.
+    """
+    delivered = 0
+
+    try:
+        for chunk in gen:
+            size = len(chunk.encode("utf-8"))
+
+            if size != 0 and delivered + size > byte_budget:
+                raise ByteBudgetExceeded(byte_budget, delivered, size)
+
+            delivered += size
+            yield chunk
+    finally:
+        # Release the underlying generator on normal exhaustion, budget
+        # overflow, consumer close, and template errors alike.  A cleanup
+        # failure must not silently replace an exception that is already
+        # being propagated.
+        try:
+            gen.close()
+        except Exception:
+            if sys.exc_info()[0] is None:
+                raise
+
+
+async def _budgeted_generate_async(
+    agen: t.AsyncGenerator[str, object], byte_budget: int
+) -> t.AsyncGenerator[str, object]:
+    """Async variant of :func:`_budgeted_generate`."""
+    delivered = 0
+
+    try:
+        async for chunk in agen:
+            size = len(chunk.encode("utf-8"))
+
+            if size != 0 and delivered + size > byte_budget:
+                raise ByteBudgetExceeded(byte_budget, delivered, size)
+
+            delivered += size
+            yield chunk
+    finally:
+        try:
+            await agen.aclose()
+        except Exception:
+            if sys.exc_info()[0] is None:
+                raise
+
+
 class Template:
     """A compiled template that can be rendered.
 
@@ -1365,6 +1432,46 @@ class Template:
                     yield event
         except Exception:
             yield self.environment.handle_exception()
+
+    def generate_with_budget(
+        self, byte_budget: int, *args: t.Any, **kwargs: t.Any
+    ) -> t.Iterator[str]:
+        """Works exactly like :meth:`generate`, but stops once the
+        generated output would exceed `byte_budget` UTF-8 bytes.
+
+        Each chunk produced by the template is either delivered in full or
+        not at all; chunks are never split, so Unicode characters and HTML
+        entities stay intact.  Empty chunks are delivered for free.  If the
+        next chunk would exceed the budget, the underlying generator is
+        closed and :class:`~jinja2.exceptions.ByteBudgetExceeded` is
+        raised, carrying `limit`, `delivered`, and `rejected` byte
+        counts (but no template output).
+
+        The budget only limits output that has already been generated.  It
+        does not interrupt a template that is stuck in a CPU-bound loop
+        without producing output.  The budget is tracked per call, never
+        on the shared environment.
+
+        :param byte_budget: Maximum number of UTF-8 bytes to deliver.  Must
+            be a non-negative `int` (`bool` is not accepted).
+
+        .. versionadded:: 3.2
+        """
+        budget = _validate_byte_budget(byte_budget)
+        gen = t.cast("t.Generator[str, None, None]", self.generate(*args, **kwargs))
+        return _budgeted_generate(gen, budget)
+
+    def generate_async_with_budget(
+        self, byte_budget: int, *args: t.Any, **kwargs: t.Any
+    ) -> t.AsyncGenerator[str, object]:
+        """An async version of :meth:`generate_with_budget`.  Works very
+        similarly but returns an async iterator instead.  Requires an
+        environment with async mode enabled, like :meth:`generate_async`.
+
+        .. versionadded:: 3.2
+        """
+        budget = _validate_byte_budget(byte_budget)
+        return _budgeted_generate_async(self.generate_async(*args, **kwargs), budget)
 
     def new_context(
         self,
