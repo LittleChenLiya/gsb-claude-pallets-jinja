@@ -27,6 +27,9 @@ from .loaders import FunctionLoader as FunctionLoader
 from .loaders import ModuleLoader as ModuleLoader
 from .loaders import PackageLoader as PackageLoader
 from .loaders import PrefixLoader as PrefixLoader
+from .macrocheck import check_templates as check_templates
+from .macrocheck import MacroIssue as MacroIssue
+from .macrocheck import MacroReport as MacroReport
 from .runtime import ChainableUndefined as ChainableUndefined
 from .runtime import DebugUndefined as DebugUndefined
 from .runtime import make_logging_undefined as make_logging_undefined

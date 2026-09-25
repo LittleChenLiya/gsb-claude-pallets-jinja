@@ -6,6 +6,10 @@ Version 3.2.0
 Unreleased
 
 -   Drop support for Python 3.7, 3.8, and 3.9.
+-   Add a static macro contract checker, ``jinja2.macrocheck``, that
+    validates macro call sites (argument counts, duplicate and unknown
+    arguments) without executing templates, and reports undecidable
+    cases separately as unknowns.
 -   Update minimum MarkupSafe version to >= 3.0.
 -   Update minimum Babel version to >= 2.17.
 -   Deprecate the ``__version__`` attribute. Use feature detection or

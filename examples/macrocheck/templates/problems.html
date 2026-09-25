@@ -1,0 +1,10 @@
+{% import 'forms.html' as forms %}
+{% import 'buttons.html' as buttons %}
+{% import dyn_name as dyn %}
+{% set buttons = 1 %}
+{{ buttons.button('Hi') }}
+{{ forms.input() }}
+{{ forms.input('a', 'b', 'c', 'd') }}
+{{ forms.input('a', label='x', label='y') }}
+{{ forms.input(*args) }}
+{% call forms.input('q') %}body{% endcall %}
