@@ -13,6 +13,11 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Add ``SnapshotLoader``, which serves templates from immutable, versioned
+    name-to-source snapshots.  Publishing validates that every template
+    compiles before atomically replacing the current version, and each
+    top-level render pins one version so that ``extends``, ``include`` and
+    ``import`` never mix templates from different versions.
 
 
 Version 3.1.6

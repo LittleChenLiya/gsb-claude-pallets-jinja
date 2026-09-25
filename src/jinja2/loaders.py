@@ -6,10 +6,13 @@ import importlib.util
 import os
 import posixpath
 import sys
+import threading
 import typing as t
 import weakref
 import zipimport
 from collections import abc
+from contextlib import contextmanager
+from contextvars import ContextVar
 from hashlib import sha1
 from importlib import import_module
 from types import ModuleType
@@ -20,6 +23,24 @@ from .utils import internalcode
 if t.TYPE_CHECKING:
     from .environment import Environment
     from .environment import Template
+
+#: Versions pinned for the currently rendering templates, mapping a
+#: :class:`SnapshotLoader` to the snapshot version that template lookups
+#: in the current context must use.  This is set while a template loaded
+#: from a :class:`SnapshotLoader` renders, so that `extends`, `include`
+#: and `import` resolve to the same snapshot version.
+_pinned_versions: ContextVar["dict[SnapshotLoader, int] | None"] = ContextVar(
+    "jinja2_pinned_snapshot_versions", default=None
+)
+
+#: The snapshot version most recently resolved by
+#: :meth:`SnapshotLoader.get_cache_key`.  The environment resolves the
+#: cache key right before calling :meth:`SnapshotLoader.load`, which
+#: consumes this value so that a concurrent :meth:`SnapshotLoader.publish`
+#: cannot make the cached template and its cache key disagree.
+_key_resolution: ContextVar["tuple[SnapshotLoader, int] | None"] = ContextVar(
+    "jinja2_snapshot_key_resolution", default=None
+)
 
 
 def split_template_path(template: str) -> list[str]:
@@ -103,6 +124,19 @@ class BaseLoader:
         it should raise a :exc:`TypeError` which is the default behavior.
         """
         raise TypeError("this loader cannot iterate over all templates")
+
+    def get_cache_key(self, name: str) -> t.Hashable:
+        """Return the key the environment uses to cache the compiled
+        template for `name`.  The default is the template name itself,
+        which is scoped to the environment (and therefore to its
+        configuration) because every environment keeps its own cache.
+        Loaders that can serve different source for the same name, such
+        as :class:`SnapshotLoader`, should override this to include
+        the extra state in the key.
+
+        .. versionadded:: 3.2
+        """
+        return name
 
     @internalcode
     def load(
@@ -451,6 +485,200 @@ class DictLoader(BaseLoader):
 
     def list_templates(self) -> list[str]:
         return sorted(self.mapping)
+
+
+class SnapshotLoader(BaseLoader):
+    """Load templates from an immutable, versioned snapshot of a
+    name-to-source mapping.  A new snapshot is published atomically with
+    :meth:`publish`, which validates that every template in the mapping
+    compiles before it replaces the current version.  If validation fails,
+    the previous version stays active and no version number is consumed.
+
+    Each top-level :meth:`Template.render`, :meth:`Template.render_async`,
+    :meth:`Template.generate` and :meth:`Template.generate_async` pins the
+    snapshot version of the template it renders.  Templates pulled in with
+    ``extends``, ``include`` and ``import`` during that render are loaded
+    from the same version, so a concurrent :meth:`publish` never mixes
+    parent and child templates from different versions.  Streaming renders
+    that have already started keep their version until they are closed.
+
+    The environment cache key includes the snapshot version (and is scoped
+    to the environment, and therefore to its configuration), so templates
+    compiled from different versions or different environment
+    configurations never share a cache entry.
+
+    >>> loader = SnapshotLoader({"index.html": "Hello {{ name }}!"})
+    >>> env = Environment(loader=loader)
+    >>> loader.publish({"index.html": "Hi {{ name }}!"})
+    2
+
+    :param mapping: Initial mapping of template names to source, published
+    as version 1.  If omitted, the loader starts empty at version 0
+    and the first :meth:`publish` returns version 1.
+    :param environment: The environment used to validate templates during
+    :meth:`publish`.  If omitted, the environment the loader is first
+    bound to is used, falling back to a default environment.
+
+    .. versionadded:: 3.2
+    """
+
+    def __init__(
+        self,
+        mapping: t.Mapping[str, str] | None = None,
+        environment: "Environment | None" = None,
+    ) -> None:
+        self._environment = environment
+        self._lock = threading.Lock()
+        self._versions: dict[int, dict[str, str]] = {}
+        self._version = 0
+
+        if mapping is not None:
+            self.publish(mapping)
+
+    @property
+    def version(self) -> int:
+        """The current snapshot version.  Starts at 0 and increases by 1
+        for every successful :meth:`publish`.
+        """
+        return self._version
+
+    @property
+    def versions(self) -> tuple[int, ...]:
+        """The successfully published snapshot versions, in ascending
+        order.  Failed publishes never appear here.
+        """
+        return tuple(sorted(self._versions))
+
+    def publish(
+        self,
+        mapping: t.Mapping[str, str],
+        environment: "Environment | None" = None,
+    ) -> int:
+        """Validate and atomically publish a complete mapping of template
+        names to source, replacing the current snapshot.
+
+        Every template in `mapping` is compiled first.  If any template
+        fails to compile, the exception is raised, the current snapshot is
+        left untouched and no version number is consumed.  Otherwise the
+        new snapshot becomes current and its version number, which
+        increases monotonically, is returned.
+
+        :param mapping: Complete mapping of template names to source for
+        the new snapshot.
+        :param environment: Environment used to validate the templates.
+        Defaults to the environment given to the constructor, then to
+        the environment the loader is bound to.
+        """
+        env = environment or self._environment
+
+        if env is None:
+            from .environment import Environment
+
+            env = Environment()
+
+        snapshot = dict(mapping)
+
+        for name, source in snapshot.items():
+            env.compile(source, name=name)
+
+        with self._lock:
+            version = self._version + 1
+            self._versions[version] = snapshot
+            self._version = version
+
+        return version
+
+    def _resolve_version(self) -> int:
+        """The version to load from: the pinned version for the current
+        render context if there is one, otherwise the current version.
+        """
+        pins = _pinned_versions.get()
+
+        if pins is not None:
+            pinned = pins.get(self)
+
+            if pinned is not None:
+                return pinned
+
+        return self._version
+
+    @contextmanager
+    def _pin_version(self, version: int) -> t.Iterator[None]:
+        """Pin `version` for template lookups in the current context."""
+        pins = _pinned_versions.get()
+        new_pins = dict(pins) if pins is not None else {}
+        new_pins[self] = version
+        token = _pinned_versions.set(new_pins)
+
+        try:
+            yield
+        finally:
+            _pinned_versions.reset(token)
+
+    def _snapshot_pin_factory(
+        self, template: "Template"
+    ) -> "t.Callable[[], t.ContextManager[None]] | None":
+        """Return a factory of context managers pinning the snapshot
+        version `template` was loaded from, or `None` if the template is
+        not versioned.  Used by the environment while rendering.
+        """
+        version = getattr(template, "_snapshot_version", None)
+
+        if version is None:
+            return None
+
+        def factory() -> t.ContextManager[None]:
+            return self._pin_version(version)
+
+        return factory
+
+    def get_cache_key(self, name: str) -> t.Hashable:
+        version = self._resolve_version()
+        _key_resolution.set((self, version))
+        return (version, name)
+
+    def get_source(
+        self, environment: "Environment", template: str
+    ) -> tuple[str, None, t.Callable[[], bool]]:
+        version = self._resolve_version()
+        mapping = self._versions.get(version)
+
+        if mapping is None or template not in mapping:
+            raise TemplateNotFound(template)
+
+        # Snapshots are immutable, a cached template never becomes stale.
+        return mapping[template], None, lambda: True
+
+    @internalcode
+    def load(
+        self,
+        environment: "Environment",
+        name: str,
+        globals: t.MutableMapping[str, t.Any] | None = None,
+    ) -> "Template":
+        if self._environment is None:
+            self._environment = environment
+
+        # The environment resolves the cache key right before calling this
+        # method.  Consume that resolution so the loaded template always
+        # matches the key it will be cached under, even if a publish
+        # happened in between.
+        resolution = _key_resolution.get()
+
+        if resolution is not None and resolution[0] is self:
+            _key_resolution.set(None)
+            version = resolution[1]
+        else:
+            version = self._resolve_version()
+
+        with self._pin_version(version):
+            template = super().load(environment, name, globals)
+
+        template._snapshot_version = version  # type: ignore[attr-defined]
+        return template
+
+    def list_templates(self) -> list[str]:
+        return sorted(self._versions.get(self._version, {}))
 
 
 class FunctionLoader(BaseLoader):

@@ -958,7 +958,7 @@ class Environment:
     ) -> "Template":
         if self.loader is None:
             raise TypeError("no loader for this environment specified")
-        cache_key = (weakref.ref(self.loader), name)
+        cache_key = (weakref.ref(self.loader), self.loader.get_cache_key(name))
         if self.cache is not None:
             template = self.cache.get(cache_key)
             if template is not None and (
@@ -1130,6 +1130,59 @@ class Environment:
         return ChainMap(d, self.globals)
 
 
+def _version_pin_factory(
+    template: "Template",
+) -> t.Callable[[], t.ContextManager[None]] | None:
+    """Return a factory of context managers that pin the loader snapshot
+    version while `template` renders, or `None` when the environment
+    loader does not provide versioned snapshots.
+    """
+    loader = template.environment.loader
+
+    if loader is None:
+        return None
+
+    factory = getattr(loader, "_snapshot_pin_factory", None)
+
+    if factory is None:
+        return None
+
+    return factory(template)
+
+
+def _pinned_steps(
+    iterator: t.Iterator[str], pin: t.Callable[[], t.ContextManager[None]]
+) -> t.Iterator[str]:
+    """Yield from `iterator`, activating `pin` around each step so that
+    templates loaded while streaming resolve to the pinned snapshot
+    version.  The pin is never active between steps, so it cannot leak
+    into the code consuming the generator.
+    """
+    while True:
+        with pin():
+            try:
+                value = next(iterator)
+            except StopIteration:
+                return
+
+        yield value
+
+
+async def _pinned_steps_async(
+    iterator: t.AsyncGenerator[str, None],
+    pin: t.Callable[[], t.ContextManager[None]],
+) -> t.AsyncGenerator[str, None]:
+    """Async version of :func:`_pinned_steps`."""
+    while True:
+        with pin():
+            try:
+                value = await iterator.__anext__()
+            except StopAsyncIteration:
+                return
+
+        yield value
+
+
 class Template:
     """A compiled template that can be rendered.
 
@@ -1285,9 +1338,14 @@ class Template:
             return asyncio.run(self.render_async(*args, **kwargs))
 
         ctx = self.new_context(dict(*args, **kwargs))
+        pin = _version_pin_factory(self)
 
         try:
-            return self.environment.concat(self.root_render_func(ctx))  # type: ignore
+            if pin is None:
+                return self.environment.concat(self.root_render_func(ctx))  # type: ignore
+
+            with pin():
+                return self.environment.concat(self.root_render_func(ctx))  # type: ignore
         except Exception:
             self.environment.handle_exception()
 
@@ -1306,11 +1364,18 @@ class Template:
             )
 
         ctx = self.new_context(dict(*args, **kwargs))
+        pin = _version_pin_factory(self)
 
         try:
-            return self.environment.concat(  # type: ignore
-                [n async for n in self.root_render_func(ctx)]  # type: ignore
-            )
+            if pin is None:
+                return self.environment.concat(  # type: ignore
+                    [n async for n in self.root_render_func(ctx)]  # type: ignore
+                )
+
+            with pin():
+                return self.environment.concat(  # type: ignore
+                    [n async for n in self.root_render_func(ctx)]  # type: ignore
+                )
         except Exception:
             return self.environment.handle_exception()
 
@@ -1338,9 +1403,13 @@ class Template:
             return
 
         ctx = self.new_context(dict(*args, **kwargs))
+        pin = _version_pin_factory(self)
 
         try:
-            yield from self.root_render_func(ctx)
+            if pin is None:
+                yield from self.root_render_func(ctx)
+            else:
+                yield from _pinned_steps(self.root_render_func(ctx), pin)
         except Exception:
             yield self.environment.handle_exception()
 
@@ -1356,13 +1425,19 @@ class Template:
             )
 
         ctx = self.new_context(dict(*args, **kwargs))
+        pin = _version_pin_factory(self)
 
         try:
             agen: t.AsyncGenerator[str, None] = self.root_render_func(ctx)  # type: ignore[assignment]
 
             async with aclosing(agen):
-                async for event in agen:
-                    yield event
+                if pin is None:
+                    async for event in agen:
+                        yield event
+                else:
+                    async with aclosing(_pinned_steps_async(agen, pin)) as pinned:
+                        async for event in pinned:
+                            yield event
         except Exception:
             yield self.environment.handle_exception()
 

@@ -438,7 +438,7 @@ All loaders are subclasses of :class:`BaseLoader`.  If you want to create your
 own loader, subclass :class:`BaseLoader` and override `get_source`.
 
 .. autoclass:: jinja2.BaseLoader
-    :members: get_source, load
+    :members: get_source, load, get_cache_key
 
 Here a list of the builtin loaders Jinja provides:
 
@@ -447,6 +447,32 @@ Here a list of the builtin loaders Jinja provides:
 .. autoclass:: jinja2.PackageLoader
 
 .. autoclass:: jinja2.DictLoader
+
+.. autoclass:: jinja2.SnapshotLoader
+    :members: publish, version, versions
+
+    A snapshot loader serves templates from an immutable, versioned
+    mapping of template names to source.  Call :meth:`publish` with a
+    complete mapping to atomically switch to a new version.  Every
+    template is validated to compile before the switch, so a failed
+    publish leaves the previous version active and does not consume a
+    version number.
+
+    Each top-level render pins the version of the template it renders,
+    so ``extends``, ``include`` and ``import`` always read from the
+    same version, even if a publish happens concurrently.  Streams that
+    have already started keep their version until they are closed.
+
+    .. code-block:: python
+
+        loader = SnapshotLoader()
+        env = Environment(loader=loader)
+
+        loader.publish({
+            `page`: `Hello {% include 'item' %}!`,
+            `item`: `World`,
+        })
+        print(env.get_template(`page`).render())
 
 .. autoclass:: jinja2.FunctionLoader
 
