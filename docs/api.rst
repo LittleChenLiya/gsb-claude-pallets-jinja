@@ -498,6 +498,29 @@ Builtin bytecode caches:
 
 .. autoclass:: jinja2.MemcachedBytecodeCache
 
+Sharing a Cache Between Environments
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A regular bytecode cache keys entries only by template name, so sharing one
+cache between environments with different compilation settings can return
+the wrong bytecode. Wrap the cache in
+:class:`~jinja2.FingerprintedBytecodeCache` to add a stable fingerprint of
+the settings that affect compilation: delimiters, whitespace handling,
+async mode, optimization, extension class names in registration order, and
+the ``compile_version`` tag. Environments with identical configuration
+still share cached entries.
+
+>>> from jinja2 import Environment, FileSystemBytecodeCache, FingerprintedBytecodeCache
+>>> cache = FingerprintedBytecodeCache(FileSystemBytecodeCache("/tmp/jinja_cache"))
+>>> env = Environment(bytecode_cache=cache)
+
+``compile_version`` is an optional string or integer supplied by the caller.
+It does not change compilation, but changing it invalidates previously
+cached bytecode; this is useful when calling code is updated in a way that
+is not visible to the environment configuration.
+
+.. autoclass:: jinja2.FingerprintedBytecodeCache
+
 
 Async Support
 -------------

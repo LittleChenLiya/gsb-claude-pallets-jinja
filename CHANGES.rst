@@ -13,6 +13,12 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Add the ``compile_version`` parameter to :class:`Environment` and the
+    :class:`FingerprintedBytecodeCache` wrapper. The wrapper adds a stable
+    environment fingerprint (delimiters, whitespace settings, async mode,
+    optimization, extension classes and ``compile_version``) to cache keys,
+    allowing environments with different compilation settings to safely
+    share one bytecode cache.
 
 
 Version 3.1.6

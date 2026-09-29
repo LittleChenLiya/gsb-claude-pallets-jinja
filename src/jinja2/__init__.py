@@ -9,6 +9,7 @@ import typing as t
 
 from .bccache import BytecodeCache as BytecodeCache
 from .bccache import FileSystemBytecodeCache as FileSystemBytecodeCache
+from .bccache import FingerprintedBytecodeCache as FingerprintedBytecodeCache
 from .bccache import MemcachedBytecodeCache as MemcachedBytecodeCache
 from .environment import Environment as Environment
 from .environment import Template as Template

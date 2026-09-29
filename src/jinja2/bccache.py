@@ -160,6 +160,70 @@ class BytecodeCache:
         """Returns a checksum for the source."""
         return sha1(source.encode("utf-8")).hexdigest()
 
+    def get_environment_fingerprint(self, environment: "Environment") -> str:
+        """Return a stable fingerprint of the environment settings that can
+        change the compiled bytecode.
+
+        The fingerprint includes the delimiters and whitespace settings of
+        the lexer, async and optimization flags, the extension class names
+        (in registration order) and the caller-provided
+        :attr:`~jinja2.Environment.compile_version` tag.
+
+        The encoding is deterministic: it uses a fixed field order and
+        :func:`pickle.dumps` with protocol 2, so it never depends on object
+        addresses, hash randomization or unordered ``repr`` output. The same
+        configuration produces the same fingerprint in different processes.
+
+        .. versionadded:: 3.2
+        """
+        # If an environment predates ``compile_version`` (or is a custom
+        # object), fall back to no version tag instead of crashing.
+        compile_version = getattr(environment, "compile_version", None)
+        config = (
+            # A format tag so that changes to the fingerprint contents
+            # invalidate entries produced by an older fingerprint layout.
+            1,
+            environment.block_start_string,
+            environment.block_end_string,
+            environment.variable_start_string,
+            environment.variable_end_string,
+            environment.comment_start_string,
+            environment.comment_end_string,
+            environment.line_statement_prefix,
+            environment.line_comment_prefix,
+            environment.trim_blocks,
+            environment.lstrip_blocks,
+            environment.newline_sequence,
+            environment.keep_trailing_newline,
+            environment.is_async,
+            environment.optimized,
+            tuple(environment.extensions),
+            compile_version,
+        )
+        # The fixed tuple order keeps the output independent of dict
+        # iteration order; pickle protocol 2 keeps the bytes stable across
+        # Python versions.
+        return sha1(pickle.dumps(config, 2)).hexdigest()
+
+    def get_fingerprinted_cache_key(
+        self,
+        environment: "Environment",
+        name: str,
+        filename: str | None = None,
+    ) -> str:
+        """Return the cache key combined with the environment fingerprint.
+
+        Unlike :meth:`get_cache_key`, the resulting key differs between
+        environments whose compilation-relevant configuration differs, so
+        multiple environments can share one backing cache without getting
+        each other's bytecode.
+
+        .. versionadded:: 3.2
+        """
+        key = self.get_cache_key(name, filename)
+        fingerprint = self.get_environment_fingerprint(environment)
+        return f"{key}.{fingerprint}"
+
     def get_bucket(
         self,
         environment: "Environment",
@@ -179,6 +243,55 @@ class BytecodeCache:
     def set_bucket(self, bucket: Bucket) -> None:
         """Put the bucket into the cache."""
         self.dump_bytecode(bucket)
+
+
+class FingerprintedBytecodeCache(BytecodeCache):
+    """Wrap another bytecode cache and isolate entries by environment.
+
+    Multiple environments can share the same backing cache while keeping
+    their bytecode separate. The cache key is extended with a fingerprint of
+    the environment settings that affect compilation (delimiters,
+    whitespace handling, async mode, optimization, extensions and the
+    caller-provided ``compile_version`` tag). Environments with the same
+    fingerprint still share entries and get cache hits.
+
+    >>> backing = FileSystemBytecodeCache("/tmp/jinja_cache")
+    >>> bcc = FingerprintedBytecodeCache(backing)
+    >>> env = Environment(bytecode_cache=bcc)
+
+    All storage operations are delegated to the wrapped cache, so this
+    works with any :class:`BytecodeCache` implementation, including custom
+    ones.
+
+    .. versionadded:: 3.2
+    """
+
+    def __init__(self, cache: BytecodeCache) -> None:
+        self.cache = cache
+
+    def get_bucket(
+        self,
+        environment: "Environment",
+        name: str,
+        filename: str | None,
+        source: str,
+    ) -> Bucket:
+        key = self.get_fingerprinted_cache_key(environment, name, filename)
+        checksum = self.get_source_checksum(source)
+        bucket = Bucket(environment, key, checksum)
+        self.cache.load_bytecode(bucket)
+        return bucket
+
+    def set_bucket(self, bucket: Bucket) -> None:
+        self.cache.dump_bytecode(bucket)
+
+    def clear(self) -> None:
+        self.cache.clear()
+
+    def __getattr__(self, name: str) -> t.Any:
+        # ``__getattr__`` only runs for attributes not found normally, so
+        # ``self.cache`` is never accessed recursively here.
+        return getattr(self.cache, name)
 
 
 class FileSystemBytecodeCache(BytecodeCache):
