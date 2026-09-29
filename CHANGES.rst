@@ -13,6 +13,11 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Add a diagnostic render mode. Environments created with
+    ``diagnostic=True`` compile templates that track missing values, and
+    ``Template.render_diagnostic`` returns the rendered text together with
+    a record (template name, line number, and access path) for each missing
+    value used during the render.
 
 
 Version 3.1.6

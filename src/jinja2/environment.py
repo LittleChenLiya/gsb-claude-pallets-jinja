@@ -44,7 +44,11 @@ from .lexer import Lexer
 from .lexer import TokenStream
 from .nodes import EvalContext
 from .parser import Parser
+from .runtime import _diagnostic_recorder
+from .runtime import _DiagnosticRecorder
 from .runtime import Context
+from .runtime import DiagnosticResult
+from .runtime import DiagnosticUndefined
 from .runtime import new_context
 from .runtime import Undefined
 from .utils import _PassArg
@@ -316,6 +320,7 @@ class Environment:
         auto_reload: bool = True,
         bytecode_cache: t.Optional["BytecodeCache"] = None,
         enable_async: bool = False,
+        diagnostic: bool = False,
     ):
         # !!Important notice!!
         #   The constructor accepts quite a few arguments that should be
@@ -327,6 +332,14 @@ class Environment:
         #   If parameter changes are required only add parameters at the end
         #   and don't change the arguments (or the defaults!) of the arguments
         #   existing already.
+
+        if diagnostic and undefined is Undefined:
+            undefined = DiagnosticUndefined
+
+        #: Enables compiling templates with diagnostic information about
+        #: missing values. Use :meth:`Template.render_diagnostic` to
+        #: render and collect the records.
+        self.diagnostic = diagnostic
 
         # lexer / parser information
         self.block_start_string = block_start_string
@@ -408,6 +421,7 @@ class Environment:
         auto_reload: bool = missing,
         bytecode_cache: t.Optional["BytecodeCache"] = missing,
         enable_async: bool = missing,
+        diagnostic: bool = missing,
     ) -> "te.Self":
         """Create a new overlay environment that shares all the data with the
         current environment except for cache and the overridden attributes.
@@ -452,6 +466,9 @@ class Environment:
 
         if enable_async is not missing:
             rv.is_async = enable_async
+
+        if rv.diagnostic and rv.undefined is Undefined:
+            rv.undefined = DiagnosticUndefined
 
         return _environment_config_check(rv)
 
@@ -1313,6 +1330,87 @@ class Template:
             )
         except Exception:
             return self.environment.handle_exception()
+
+    def render_diagnostic(self, *args: t.Any, **kwargs: t.Any) -> DiagnosticResult:
+        """Render the template in diagnostic mode and return a
+        :class:`~jinja2.runtime.DiagnosticResult` with the rendered text
+        and a record for each missing value that was used while rendering.
+        Each record has the template name, line number, and access path
+        (such as ``user.name``) of the missing value.
+
+        This accepts the same arguments as :meth:`render`. Missing values
+        are rendered as empty strings instead of failing, so that all of
+        them can be reported at once. Real errors, such as a division by
+        zero, are still raised.
+
+        The environment must have been created with ``diagnostic=True``
+        for the records to contain template names and line numbers.
+
+        .. versionadded:: 3.2
+        """
+        if self.environment.is_async:
+            import asyncio
+
+            return asyncio.run(self.render_diagnostic_async(*args, **kwargs))
+
+        if not self.environment.diagnostic:
+            raise RuntimeError(
+                "Template.render_diagnostic requires the environment to be"
+                " created with diagnostic=True."
+            )
+
+        recorder = _DiagnosticRecorder()
+        token = _diagnostic_recorder.set(recorder)
+
+        try:
+            ctx = self.new_context(dict(*args, **kwargs))
+
+            try:
+                text = self.environment.concat(self.root_render_func(ctx))  # type: ignore
+            except Exception:
+                self.environment.handle_exception()
+        finally:
+            _diagnostic_recorder.reset(token)
+
+        return DiagnosticResult(text=text, missing=recorder.records)
+
+    async def render_diagnostic_async(
+        self, *args: t.Any, **kwargs: t.Any
+    ) -> DiagnosticResult:
+        """An async version of :meth:`render_diagnostic`. Works very
+        similarly but returns a coroutine that when awaited returns the
+        :class:`~jinja2.runtime.DiagnosticResult`. This requires the
+        async feature to be enabled.
+
+        .. versionadded:: 3.2
+        """
+        if not self.environment.is_async:
+            raise RuntimeError(
+                "The environment was not created with async mode enabled."
+            )
+
+        if not self.environment.diagnostic:
+            raise RuntimeError(
+                "Template.render_diagnostic_async requires the environment"
+                " to be created with diagnostic=True."
+            )
+
+        recorder = _DiagnosticRecorder()
+        token = _diagnostic_recorder.set(recorder)
+
+        try:
+            ctx = self.new_context(dict(*args, **kwargs))
+
+            try:
+                text = self.environment.concat(  # type: ignore
+                    [n async for n in self.root_render_func(ctx)]  # type: ignore
+                )
+            except Exception:
+                return self.environment.handle_exception()
+        finally:
+            _diagnostic_recorder.reset(token)
+
+        return DiagnosticResult(text=text, missing=recorder.records)
 
     def stream(self, *args: t.Any, **kwargs: t.Any) -> "TemplateStream":
         """Works exactly like :meth:`generate` but returns a

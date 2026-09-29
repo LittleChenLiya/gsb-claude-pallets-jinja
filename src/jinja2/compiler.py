@@ -1646,6 +1646,16 @@ class CodeGenerator(NodeVisitor):
                 and load[0] == VAR_LOAD_PARAMETER
                 and not self.parameter_is_undeclared(ref)
             ):
+                if self.environment.diagnostic:
+                    # In diagnostic mode the undefined also carries the
+                    # template name and line number so that a missing
+                    # value can be reported with its source location.
+                    self.write(
+                        f"(undefined(name={node.name!r}, template={self.name!r},"
+                        f" line={node.lineno}) if {ref} is missing else {ref})"
+                    )
+                    return
+
                 self.write(
                     f"(undefined(name={node.name!r}) if {ref} is missing else {ref})"
                 )

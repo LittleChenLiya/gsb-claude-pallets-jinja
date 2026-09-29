@@ -4,6 +4,7 @@ import functools
 import sys
 import typing as t
 from collections import abc
+from contextvars import ContextVar
 from itertools import chain
 
 from markupsafe import escape  # noqa: F401
@@ -1002,6 +1003,192 @@ class ChainableUndefined(Undefined):
 
     def __getitem__(self, _name: str) -> "ChainableUndefined":  # type: ignore[override]
         return self
+
+
+class MissingValue:
+    """A record of a single missing value that was used while rendering a
+    template in diagnostic mode.
+
+    .. versionadded:: 3.2
+    """
+
+    __slots__ = ("template", "line", "path")
+
+    def __init__(
+        self, template: str | None, line: int | None, path: str | None
+    ) -> None:
+        #: Name of the template where the missing value was used, or
+        #: ``None`` if the template has no name.
+        self.template = template
+        #: Line number in the template where the missing value was used,
+        #: or ``None`` if the line is not known.
+        self.line = line
+        #: Access path of the missing value, such as ``"user.name"`` or
+        #: ``"items[0].price"``.
+        self.path = path
+
+    def __repr__(self) -> str:
+        return (
+            f"{type(self).__name__}(template={self.template!r},"
+            f" line={self.line!r}, path={self.path!r})"
+        )
+
+    def __eq__(self, other: t.Any) -> bool:
+        if not isinstance(other, MissingValue):
+            return NotImplemented
+
+        return (
+            self.template == other.template
+            and self.line == other.line
+            and self.path == other.path
+        )
+
+
+class DiagnosticResult:
+    """The result of :meth:`Template.render_diagnostic`. Contains the
+    rendered text along with the records of missing values that were used
+    while rendering.
+
+    Can be unpacked as ``text, missing = template.render_diagnostic(...)``.
+
+    .. versionadded:: 3.2
+    """
+
+    __slots__ = ("text", "missing")
+
+    def __init__(self, text: str, missing: list[MissingValue]) -> None:
+        #: The rendered text. Missing values are rendered as empty strings.
+        self.text = text
+        #: Records of missing values used during rendering, in the order
+        #: they were first encountered.
+        self.missing = missing
+
+    def __iter__(self) -> t.Iterator[t.Any]:
+        return iter((self.text, self.missing))
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}(text={self.text!r}, missing={self.missing!r})"
+
+
+class _DiagnosticRecorder:
+    """Collects :class:`MissingValue` records for a single diagnostic
+    render, discarding exact duplicates.
+    """
+
+    __slots__ = ("records", "_seen")
+
+    def __init__(self) -> None:
+        self.records: list[MissingValue] = []
+        self._seen: set[tuple[str | None, int | None, str | None]] = set()
+
+    def add(self, template: str | None, line: int | None, path: str | None) -> None:
+        key = (template, line, path)
+
+        if key not in self._seen:
+            self._seen.add(key)
+            self.records.append(MissingValue(template=template, line=line, path=path))
+
+
+#: Holds the recorder for the currently active diagnostic render, if any.
+#: Each call to ``Template.render_diagnostic`` sets a fresh recorder and
+#: resets it when the render is done, so records never leak between
+#: independent renders.
+_diagnostic_recorder: ContextVar[_DiagnosticRecorder | None] = ContextVar(
+    "jinja2_diagnostic_recorder", default=None
+)
+
+
+class DiagnosticUndefined(ChainableUndefined):
+    """An undefined used in diagnostic mode. It is chainable like
+    :class:`ChainableUndefined`, tracks the access path (such as
+    ``user.name`` or ``items[0].price``), and reports to the active
+    diagnostic recorder when the value is actually used, for example by
+    being printed, iterated, or treated as a boolean.
+
+    Accesses that only inspect the value without using it, such as the
+    ``default`` filter or the ``defined`` test, are not reported.
+
+    .. versionadded:: 3.2
+    """
+
+    __slots__ = ("_diagnostic_template", "_diagnostic_line", "_diagnostic_path")
+
+    def __init__(
+        self,
+        hint: str | None = None,
+        obj: t.Any = missing,
+        name: str | None = None,
+        exc: type[TemplateRuntimeError] = UndefinedError,
+        *,
+        template: str | None = None,
+        line: int | None = None,
+        path: str | None = None,
+    ) -> None:
+        super().__init__(hint=hint, obj=obj, name=name, exc=exc)
+        self._diagnostic_template = template
+        self._diagnostic_line = line
+
+        if path is None and isinstance(name, str):
+            path = name
+
+        self._diagnostic_path = path
+
+    def _diagnostic_extend(self, key: t.Any, *, attr: bool) -> "DiagnosticUndefined":
+        path = self._diagnostic_path
+
+        if path is not None:
+            if attr:
+                path = f"{path}.{key}"
+            elif isinstance(key, str):
+                path = f"{path}[{key!r}]"
+            else:
+                path = f"{path}[{key}]"
+
+        return type(self)(
+            hint=self._undefined_hint,
+            obj=self._undefined_obj,
+            name=self._undefined_name,
+            exc=self._undefined_exception,
+            template=self._diagnostic_template,
+            line=self._diagnostic_line,
+            path=path,
+        )
+
+    def __getattr__(self, name: str) -> "DiagnosticUndefined":
+        if name[:2] == "__" and name[-2:] == "__":
+            raise AttributeError(name)
+
+        return self._diagnostic_extend(name, attr=True)
+
+    def __getitem__(self, key: t.Any) -> "DiagnosticUndefined":  # type: ignore[override]
+        return self._diagnostic_extend(key, attr=False)
+
+    def _diagnostic_record(self) -> None:
+        recorder = _diagnostic_recorder.get()
+
+        if recorder is not None:
+            path = self._diagnostic_path
+
+            if path is None:
+                path = str(self._undefined_name)
+
+            recorder.add(self._diagnostic_template, self._diagnostic_line, path)
+
+    def __str__(self) -> str:
+        self._diagnostic_record()
+        return super().__str__()
+
+    def __len__(self) -> int:
+        self._diagnostic_record()
+        return super().__len__()
+
+    def __iter__(self) -> t.Iterator[t.Any]:
+        self._diagnostic_record()
+        return super().__iter__()
+
+    def __bool__(self) -> bool:
+        self._diagnostic_record()
+        return super().__bool__()
 
 
 class DebugUndefined(Undefined):
