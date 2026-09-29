@@ -59,6 +59,11 @@ exported = [
     "Namespace",
     "Undefined",
     "internalcode",
+    "diag_name",
+    "diag_getattr",
+    "diag_getitem",
+    "diag_chain_getattr",
+    "diag_chain_getitem",
 ]
 async_exported = [
     "AsyncLoopContext",
@@ -1060,3 +1065,19 @@ class StrictUndefined(Undefined):
     __iter__ = __str__ = __len__ = Undefined._fail_with_undefined_error
     __eq__ = __ne__ = __bool__ = __hash__ = Undefined._fail_with_undefined_error
     __contains__ = Undefined._fail_with_undefined_error
+
+
+def __getattr__(name: str) -> t.Any:
+    # Lazy import to avoid a circular import: the diagnostic hooks are
+    # defined in a module that imports Undefined from this module.
+    if name in {
+        "diag_name",
+        "diag_getattr",
+        "diag_getitem",
+        "diag_chain_getattr",
+        "diag_chain_getitem",
+    }:
+        from . import _diagnostics
+
+        return getattr(_diagnostics, name)
+    raise AttributeError(name)

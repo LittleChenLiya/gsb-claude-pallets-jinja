@@ -13,6 +13,14 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Add an explicit diagnostic rendering entry point,
+    ``Template.render_with_diagnostics`` (and
+    ``render_with_diagnostics_async``). It renders normally while
+    collecting missing variables, each with the template name, line
+    number, and access path such as ``user.name`` or
+    ``items[0].price``. Missing values handled with ``is defined``,
+    ``is undefined``, or the ``default`` filter are not recorded, and
+    other errors are still raised.
 
 
 Version 3.1.6

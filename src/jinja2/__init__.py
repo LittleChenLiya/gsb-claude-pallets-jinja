@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import typing as t
 
+from ._diagnostics import DiagnosticResult as DiagnosticResult
+from ._diagnostics import DiagnosticsRecorder as DiagnosticsRecorder
+from ._diagnostics import MissingVariable as MissingVariable
 from .bccache import BytecodeCache as BytecodeCache
 from .bccache import FileSystemBytecodeCache as FileSystemBytecodeCache
 from .bccache import MemcachedBytecodeCache as MemcachedBytecodeCache

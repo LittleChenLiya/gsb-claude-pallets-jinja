@@ -369,6 +369,18 @@ class CodeGenerator(NodeVisitor):
         # Tracks the current context.
         self._context_reference_stack = ["context"]
 
+        # Diagnostic instrumentation state.
+        #
+        # ``_diag_depth`` is greater than zero while visiting nodes that
+        # are the node or argument of a Getattr/Getitem.  Only the root of
+        # a lookup chain is wrapped with a diagnostic hook.
+        #
+        # ``_diag_suppressed`` is greater than zero while visiting the
+        # target of a ``defined``/``undefined`` test or a ``default``
+        # filter, where an undefined value is handled on purpose.
+        self._diag_depth = 0
+        self._diag_suppressed = 0
+
     @property
     def optimized(self) -> bool:
         return self.optimizer is not None
@@ -763,6 +775,85 @@ class CodeGenerator(NodeVisitor):
         if target == "context":
             return "resolve"
         return f"{target}.resolve"
+
+    @contextmanager
+    def _diag_suppress(self) -> t.Iterator[None]:
+        """Don't instrument undefined accesses that are handled on
+        purpose (``is defined``, ``is undefined`` and the ``default``
+        filter's target).
+        """
+        self._diag_suppressed += 1
+        try:
+            yield
+        finally:
+            self._diag_suppressed -= 1
+
+    def _diag_chain_root(self, node: nodes.Node) -> bool:
+        """Check whether ``node`` is the root of a lookup chain that may
+        resolve to a missing variable.
+        """
+        chain = node
+        while isinstance(chain, (nodes.Getattr, nodes.Getitem)):
+            # Slices bypass environment.getitem and cannot be part of a
+            # recorded lookup chain.
+            if isinstance(chain, nodes.Getitem) and isinstance(chain.arg, nodes.Slice):
+                return False
+            chain = chain.node
+        return isinstance(chain, nodes.Name) and chain.ctx == "load"
+
+    @staticmethod
+    def _diag_path_node(node: nodes.Node) -> str:
+        """Build the access path for a lookup chain node."""
+        parts: list[tuple[str, bool] | None] = []
+        current = node
+        while isinstance(current, (nodes.Getattr, nodes.Getitem)):
+            if isinstance(current, nodes.Getattr):
+                parts.append((current.attr, False))
+            elif isinstance(current.arg, nodes.Const):
+                parts.append((repr(current.arg.value), True))
+            else:
+                parts.append(None)
+            current = current.node
+
+        if not isinstance(current, nodes.Name):
+            return ""
+
+        path = current.name
+        while parts:
+            part = parts.pop()
+            if part is None:
+                path += "[?]"
+            elif part[1]:
+                path += f"[{part[0]}]"
+            elif part[0].isidentifier():
+                path += f".{part[0]}"
+            else:
+                path += f"[{part[0]!r}]"
+        return path
+
+    def _diag_step(
+        self,
+        outer_hook: str,
+        inner_hook: str,
+        raw_func: str,
+        node: nodes.Node,
+    ) -> tuple[str, str]:
+        """Return ``(func_name, suffix)`` code for a getattr/getitem step.
+
+        The outermost step of a lookup chain records with its full path.
+        Inner steps use silent hooks that propagate a placeholder when a
+        previous step failed.  Accesses handled on purpose (``is
+        defined`` and ``default``) keep the original raw lookup.
+        """
+        if self._diag_suppressed:
+            return raw_func, ")"
+
+        if self._diag_depth == 0 and self._diag_chain_root(node):
+            path = self._diag_path_node(node)
+            suffix = f", {self.get_context_ref() + '.name'}, {node.lineno}, {path!r})"
+            return outer_hook, suffix
+
+        return inner_hook, ")"
 
     def derive_context(self, frame: Frame) -> str:
         return f"{self.get_context_ref()}.derived({self.dump_local_context(frame)})"
@@ -1646,9 +1737,17 @@ class CodeGenerator(NodeVisitor):
                 and load[0] == VAR_LOAD_PARAMETER
                 and not self.parameter_is_undeclared(ref)
             ):
-                self.write(
+                lookup = (
                     f"(undefined(name={node.name!r}) if {ref} is missing else {ref})"
                 )
+
+                if self._diag_depth == 0 and self._diag_suppressed == 0:
+                    self.write(
+                        f"diag_name({lookup}, {self.get_context_ref() + '.name'},"
+                        f" {node.lineno}, {node.name!r})"
+                    )
+                else:
+                    self.write(lookup)
                 return
 
         self.write(ref)
@@ -1747,9 +1846,17 @@ class CodeGenerator(NodeVisitor):
         if self.environment.is_async:
             self.write("(await auto_await(")
 
-        self.write("environment.getattr(")
-        self.visit(node.node, frame)
-        self.write(f", {node.attr!r})")
+        func_name, suffix = self._diag_step(
+            "diag_getattr", "diag_chain_getattr", "environment.getattr", node
+        )
+        env_prefix = "" if func_name == "environment.getattr" else "environment, "
+        self.write(f"{func_name}({env_prefix}")
+        self._diag_depth += 1
+        try:
+            self.visit(node.node, frame)
+            self.write(f", {node.attr!r}{suffix}")
+        finally:
+            self._diag_depth -= 1
 
         if self.environment.is_async:
             self.write("))")
@@ -1758,7 +1865,11 @@ class CodeGenerator(NodeVisitor):
     def visit_Getitem(self, node: nodes.Getitem, frame: Frame) -> None:
         # slices bypass the environment getitem method.
         if isinstance(node.arg, nodes.Slice):
-            self.visit(node.node, frame)
+            self._diag_depth += 1
+            try:
+                self.visit(node.node, frame)
+            finally:
+                self._diag_depth -= 1
             self.write("[")
             self.visit(node.arg, frame)
             self.write("]")
@@ -1766,11 +1877,19 @@ class CodeGenerator(NodeVisitor):
             if self.environment.is_async:
                 self.write("(await auto_await(")
 
-            self.write("environment.getitem(")
-            self.visit(node.node, frame)
-            self.write(", ")
-            self.visit(node.arg, frame)
-            self.write(")")
+            func_name, suffix = self._diag_step(
+                "diag_getitem", "diag_chain_getitem", "environment.getitem", node
+            )
+            env_prefix = "" if func_name == "environment.getitem" else "environment, "
+            self.write(f"{func_name}({env_prefix}")
+            self._diag_depth += 1
+            try:
+                self.visit(node.node, frame)
+                self.write(", ")
+                self.visit(node.arg, frame)
+                self.write(suffix)
+            finally:
+                self._diag_depth -= 1
 
             if self.environment.is_async:
                 self.write("))")
@@ -1833,7 +1952,11 @@ class CodeGenerator(NodeVisitor):
             # if the filter node is None we are inside a filter block
             # and want to write to the current buffer
             if node.node is not None:
-                self.visit(node.node, frame)
+                if node.name == "default":
+                    with self._diag_suppress():
+                        self.visit(node.node, frame)
+                else:
+                    self.visit(node.node, frame)
             elif frame.eval_ctx.volatile:
                 self.write(
                     f"(Markup(concat({frame.buffer}))"
@@ -1847,7 +1970,11 @@ class CodeGenerator(NodeVisitor):
     @optimizeconst
     def visit_Test(self, node: nodes.Test, frame: Frame) -> None:
         with self._filter_test_common(node, frame, False):
-            self.visit(node.node, frame)
+            if node.name in {"defined", "undefined"}:
+                with self._diag_suppress():
+                    self.visit(node.node, frame)
+            else:
+                self.visit(node.node, frame)
 
     @optimizeconst
     def visit_CondExpr(self, node: nodes.CondExpr, frame: Frame) -> None:

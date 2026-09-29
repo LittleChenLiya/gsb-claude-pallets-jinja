@@ -58,6 +58,7 @@ from .utils import missing
 if t.TYPE_CHECKING:
     import typing_extensions as te
 
+    from ._diagnostics import DiagnosticResult
     from .bccache import BytecodeCache
     from .ext import Extension
     from .loaders import BaseLoader
@@ -1313,6 +1314,77 @@ class Template:
             )
         except Exception:
             return self.environment.handle_exception()
+
+    def render_with_diagnostics(
+        self, *args: t.Any, **kwargs: t.Any
+    ) -> "DiagnosticResult":
+        """Render the template and collect missing values instead of
+        fixing them one at a time and re-rendering.
+
+        This accepts the same arguments as :meth:`render`.  It returns a
+        :class:`~jinja2.DiagnosticResult` containing the rendered text
+        and a tuple of :class:`~jinja2.MissingVariable` records.  Each
+        record contains the template name, line number and access path
+        (such as ``user.name`` or ``items[0].price``) of a missing
+        value, including values accessed in included templates.
+
+        Missing values are rendered as empty strings, as with the
+        default undefined behavior.  Missing values handled on purpose
+        (``is defined``, ``is undefined`` and the ``default`` filter)
+        are not recorded.  Other errors, such as a real division by
+        zero, are raised normally with their traceback rewritten.
+
+        Records are collected per call and are never shared between
+        independent renders.
+        """
+        if self.environment.is_async:
+            import asyncio
+
+            return asyncio.run(self.render_with_diagnostics_async(*args, **kwargs))
+
+        from ._diagnostics import DiagnosticResult
+        from ._diagnostics import DiagnosticsRecorder
+        from ._diagnostics import record_diagnostics
+
+        recorder = DiagnosticsRecorder()
+        ctx = self.new_context(dict(*args, **kwargs))
+
+        try:
+            with record_diagnostics(recorder):
+                output = self.environment.concat(self.root_render_func(ctx))
+        except Exception:
+            self.environment.handle_exception()
+
+        return DiagnosticResult(output=output, missing=recorder.missing)
+
+    async def render_with_diagnostics_async(
+        self, *args: t.Any, **kwargs: t.Any
+    ) -> "DiagnosticResult":
+        """Async version of :meth:`render_with_diagnostics`.
+
+        The environment must be created with async mode enabled.
+        """
+        if not self.environment.is_async:
+            raise RuntimeError(
+                "The environment was not created with async mode enabled."
+            )
+
+        from ._diagnostics import DiagnosticResult
+        from ._diagnostics import DiagnosticsRecorder
+        from ._diagnostics import record_diagnostics
+
+        recorder = DiagnosticsRecorder()
+        ctx = self.new_context(dict(*args, **kwargs))
+
+        try:
+            with record_diagnostics(recorder):
+                output = self.environment.concat(  # type: ignore
+                    [n async for n in self.root_render_func(ctx)]  # type: ignore
+                )
+        except Exception:
+            return self.environment.handle_exception()
+
+        return DiagnosticResult(output=output, missing=recorder.missing)
 
     def stream(self, *args: t.Any, **kwargs: t.Any) -> "TemplateStream":
         """Works exactly like :meth:`generate` but returns a

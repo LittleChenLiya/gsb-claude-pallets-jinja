@@ -215,6 +215,16 @@ useful if you want to dig deeper into Jinja or :ref:`develop extensions
 
     .. automethod:: generate_async([context])
 
+    .. automethod:: render_with_diagnostics([context])
+
+    .. automethod:: render_with_diagnostics_async([context])
+
+.. autoclass:: jinja2.DiagnosticResult()
+    :members: output, missing
+
+.. autoclass:: jinja2.MissingVariable()
+    :members: name, line, path
+
 
 .. autoclass:: jinja2.environment.TemplateStream()
     :members: disable_buffering, enable_buffering, dump
