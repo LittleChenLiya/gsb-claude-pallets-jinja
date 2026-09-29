@@ -13,6 +13,14 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Bytecode caches can share one backend between environments with
+    different compile-affecting settings by enabling
+    ``use_environment_fingerprint``.  The stable fingerprint covers the
+    delimiters, whitespace handling, ``is_async``, ``optimized``, the
+    extension class names in application order and an optional
+    ``compile_version`` marker.
+-   Corrupt bytecode cache entries with an invalid checksum payload are
+    ignored and recompiled instead of raising an error.
 
 
 Version 3.1.6

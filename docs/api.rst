@@ -472,8 +472,20 @@ the application.
 
 To use a bytecode cache, instantiate it and pass it to the :class:`Environment`.
 
+.. versionadded:: 3.2
+    A bytecode cache can be shared between environments with different
+    settings by passing ``use_environment_fingerprint=True``.  The cache
+    key then includes a stable fingerprint of the configuration that
+    affects compilation: delimiters, whitespace handling, ``is_async``,
+    ``optimized``, the extension classes in the order they are applied and
+    an optional caller supplied ``compile_version`` marker.  This keeps the
+    bytecode of sync and async environments, or environments with different
+    delimiters, separate in one shared cache.  Change ``compile_version``
+    (a string, bytes or int) to invalidate the whole cache when a custom
+    code generator or other external compilation input changes.
+
 .. autoclass:: jinja2.BytecodeCache
-    :members: load_bytecode, dump_bytecode, clear
+    :members: load_bytecode, dump_bytecode, clear, get_environment_fingerprint
 
 .. autoclass:: jinja2.bccache.Bucket
     :members: write_bytecode, load_bytecode, bytecode_from_string,

@@ -12,6 +12,7 @@ import marshal
 import os
 import pickle
 import stat
+import struct
 import sys
 import tempfile
 import typing as t
@@ -41,6 +42,29 @@ bc_magic = (
 )
 
 
+def _fingerprint_value(value: t.Any) -> bytes:
+    """Stably encode a single fingerprint value.
+
+    Only immutable, well defined types are accepted.  Strings and bytes
+    use an explicit length prefix so the encoding is unambiguous.  Object
+    addresses and unordered ``repr`` output are never used.
+    """
+    if value is None:
+        return b"N"
+    if isinstance(value, bool):
+        return b"B" + (b"1" if value else b"0")
+    if isinstance(value, int):
+        return b"I" + str(value).encode("ascii")
+    if isinstance(value, str):
+        data = value.encode("utf-8")
+        return b"S" + f"{len(data)}:".encode("ascii") + data
+    if isinstance(value, bytes):
+        return b"Y" + f"{len(value)}:".encode("ascii") + value
+    raise TypeError(
+        f"compile_version must be None, bytes, str or int, not {type(value).__name__}"
+    )
+
+
 class Bucket:
     """Buckets are used to store the bytecode for one template.  It's created
     and initialized by the bytecode cache and passed to the loading functions.
@@ -68,7 +92,21 @@ class Bucket:
             self.reset()
             return
         # the source code of the file changed, we need to reload
-        checksum = pickle.load(f)
+        try:
+            checksum = pickle.load(f)
+        except (
+            EOFError,
+            ValueError,
+            TypeError,
+            KeyError,
+            IndexError,
+            AttributeError,
+            ImportError,
+            struct.error,
+            pickle.UnpicklingError,
+        ):
+            self.reset()
+            return
         if self.checksum != checksum:
             self.reset()
             return
@@ -125,7 +163,40 @@ class BytecodeCache:
 
     A more advanced version of a filesystem based bytecode cache is part of
     Jinja.
+
+    The ``use_environment_fingerprint`` flag enables a cache mode where
+    the cache key contains a stable fingerprint of the settings that change
+    the compiled bytecode: the delimiters, whitespace handling,
+    ``is_async``, ``optimized``, the extension class names in application
+    order and the optional ``compile_version`` marker supplied by the
+    caller.  This makes it safe to share one cache between multiple
+    environments with different configurations.  The fingerprint encoding
+    is deterministic and does not use object addresses or unordered
+    ``repr`` output.
+
+    ``compile_version`` may be a string, bytes or int.  Changing it
+    changes every fingerprint, which forces a recompile.
     """
+
+    def __init__(
+        self,
+        use_environment_fingerprint: bool = False,
+        compile_version: str | bytes | int | None = None,
+    ) -> None:
+        """Subclasses calling ``super().__init__`` get access to the
+        environment fingerprint cache mode.
+
+        :param use_environment_fingerprint: Include a stable fingerprint of
+            the environment configuration in every cache key.  This makes
+            it safe to share one bytecode cache between environments that
+            compile templates differently, such as sync and async
+            environments or environments using different delimiters.
+        :param compile_version: Caller supplied marker that is part of the
+            fingerprint.  Change it to invalidate all cached bytecode, for
+            example when a custom code generator changes.
+        """
+        self.use_environment_fingerprint = use_environment_fingerprint
+        self.compile_version = compile_version
 
     def load_bytecode(self, bucket: Bucket) -> None:
         """Subclasses have to override this method to load bytecode into a
@@ -147,12 +218,71 @@ class BytecodeCache:
         by a particular environment.
         """
 
-    def get_cache_key(self, name: str, filename: str | None = None) -> str:
+    def get_cache_key(
+        self,
+        name: str,
+        filename: str | None = None,
+        environment: "Environment | None" = None,
+    ) -> str:
         """Returns the unique hash key for this template name."""
         hash = sha1(name.encode("utf-8"))
 
         if filename is not None:
             hash.update(f"|{filename}".encode())
+
+        if (
+            getattr(self, "use_environment_fingerprint", False)
+            and environment is not None
+        ):
+            hash.update(b"|env:")
+            hash.update(self.get_environment_fingerprint(environment).encode("ascii"))
+
+        return hash.hexdigest()
+
+    def get_environment_fingerprint(self, environment: "Environment") -> str:
+        """Return a stable hash of the environment settings that affect
+        compiled bytecode.
+
+        The fingerprint covers the lexer delimiters, whitespace handling,
+        the async flag, the optimizer flag, the qualified names of the
+        extension classes in the order they are applied and the caller
+        supplied :attr:`compile_version`.
+
+        The encoding only contains explicit data and length prefixes; it
+        never uses object identity, memory addresses or an unordered
+        ``repr``.
+        """
+        hash = sha1(b"jinja2-environment-fingerprint")
+
+        for value in (
+            environment.block_start_string,
+            environment.block_end_string,
+            environment.variable_start_string,
+            environment.variable_end_string,
+            environment.comment_start_string,
+            environment.comment_end_string,
+            environment.line_statement_prefix,
+            environment.line_comment_prefix,
+            environment.trim_blocks,
+            environment.lstrip_blocks,
+            environment.newline_sequence,
+            environment.keep_trailing_newline,
+            environment.is_async,
+            environment.optimized,
+        ):
+            hash.update(b";")
+            hash.update(_fingerprint_value(value))
+
+        hash.update(b";extensions=")
+        for extension in environment.iter_extensions():
+            cls = type(extension)
+            name = f"{cls.__module__}.{cls.__qualname__}".encode()
+            hash.update(f"{len(name)}:".encode("ascii"))
+            hash.update(name)
+            hash.update(b";")
+
+        hash.update(b";compile_version=")
+        hash.update(_fingerprint_value(getattr(self, "compile_version", None)))
 
         return hash.hexdigest()
 
@@ -170,7 +300,7 @@ class BytecodeCache:
         """Return a cache bucket for the given template.  All arguments are
         mandatory but filename may be `None`.
         """
-        key = self.get_cache_key(name, filename)
+        key = self.get_cache_key(name, filename, environment)
         checksum = self.get_source_checksum(source)
         bucket = Bucket(environment, key, checksum)
         self.load_bytecode(bucket)
@@ -200,8 +330,16 @@ class FileSystemBytecodeCache(BytecodeCache):
     """
 
     def __init__(
-        self, directory: str | None = None, pattern: str = "__jinja2_%s.cache"
+        self,
+        directory: str | None = None,
+        pattern: str = "__jinja2_%s.cache",
+        use_environment_fingerprint: bool = False,
+        compile_version: str | bytes | int | None = None,
     ) -> None:
+        super().__init__(
+            use_environment_fingerprint=use_environment_fingerprint,
+            compile_version=compile_version,
+        )
         if directory is None:
             directory = self._get_default_cache_dir()
         self.directory = directory
@@ -375,7 +513,13 @@ class MemcachedBytecodeCache(BytecodeCache):
         prefix: str = "jinja2/bytecode/",
         timeout: int | None = None,
         ignore_memcache_errors: bool = True,
+        use_environment_fingerprint: bool = False,
+        compile_version: str | bytes | int | None = None,
     ):
+        super().__init__(
+            use_environment_fingerprint=use_environment_fingerprint,
+            compile_version=compile_version,
+        )
         self.client = client
         self.prefix = prefix
         self.timeout = timeout
