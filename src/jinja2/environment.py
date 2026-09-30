@@ -8,6 +8,7 @@ import typing as t
 import weakref
 from collections import ChainMap
 from contextlib import aclosing
+from contextlib import contextmanager
 from functools import lru_cache
 from functools import partial
 from functools import reduce
@@ -42,6 +43,7 @@ from .exceptions import UndefinedError
 from .lexer import get_lexer
 from .lexer import Lexer
 from .lexer import TokenStream
+from .loaders import SnapshotLoader
 from .nodes import EvalContext
 from .parser import Parser
 from .runtime import Context
@@ -958,7 +960,24 @@ class Environment:
     ) -> "Template":
         if self.loader is None:
             raise TypeError("no loader for this environment specified")
-        cache_key = (weakref.ref(self.loader), name)
+        loader = self.loader
+
+        if isinstance(loader, SnapshotLoader):
+            if loader._pinned_version() is None:
+                # Pin the current version so that the cache key and the
+                # source read observe one consistent snapshot, even if a
+                # publish happens concurrently.
+                with loader._pin():
+                    return self._load_template(name, globals)
+
+            # The cache key distinguishes snapshots, so the same name
+            # loaded from different versions never collides. The cache
+            # itself is per environment, keeping environment
+            # configurations apart.
+            cache_key: t.Any = (weakref.ref(loader), name, loader._pinned_version())
+        else:
+            cache_key = (weakref.ref(loader), name)
+
         if self.cache is not None:
             template = self.cache.get(cache_key)
             if template is not None and (
@@ -1130,6 +1149,23 @@ class Environment:
         return ChainMap(d, self.globals)
 
 
+@contextmanager
+def _snapshot_pin(template: "Template") -> t.Iterator[None]:
+    """Pin the :class:`~jinja2.SnapshotLoader` version a template was
+    loaded from for the duration of a render, so that ``extends``,
+    ``include``, and ``import`` lookups read from the same snapshot.
+    Does nothing for templates from other loaders.
+    """
+    version = getattr(template, "_snapshot_version", None)
+    loader = template.environment.loader
+
+    if version is None or not isinstance(loader, SnapshotLoader):
+        yield
+    else:
+        with loader._pin(version):
+            yield
+
+
 class Template:
     """A compiled template that can be rendered.
 
@@ -1287,7 +1323,8 @@ class Template:
         ctx = self.new_context(dict(*args, **kwargs))
 
         try:
-            return self.environment.concat(self.root_render_func(ctx))  # type: ignore
+            with _snapshot_pin(self):
+                return self.environment.concat(self.root_render_func(ctx))  # type: ignore
         except Exception:
             self.environment.handle_exception()
 
@@ -1308,9 +1345,10 @@ class Template:
         ctx = self.new_context(dict(*args, **kwargs))
 
         try:
-            return self.environment.concat(  # type: ignore
-                [n async for n in self.root_render_func(ctx)]  # type: ignore
-            )
+            with _snapshot_pin(self):
+                return self.environment.concat(  # type: ignore
+                    [n async for n in self.root_render_func(ctx)]  # type: ignore
+                )
         except Exception:
             return self.environment.handle_exception()
 
@@ -1340,7 +1378,8 @@ class Template:
         ctx = self.new_context(dict(*args, **kwargs))
 
         try:
-            yield from self.root_render_func(ctx)
+            with _snapshot_pin(self):
+                yield from self.root_render_func(ctx)
         except Exception:
             yield self.environment.handle_exception()
 
@@ -1360,9 +1399,10 @@ class Template:
         try:
             agen: t.AsyncGenerator[str, None] = self.root_render_func(ctx)  # type: ignore[assignment]
 
-            async with aclosing(agen):
-                async for event in agen:
-                    yield event
+            with _snapshot_pin(self):
+                async with aclosing(agen):
+                    async for event in agen:
+                        yield event
         except Exception:
             yield self.environment.handle_exception()
 

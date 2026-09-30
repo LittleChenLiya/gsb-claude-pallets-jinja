@@ -448,6 +448,9 @@ Here a list of the builtin loaders Jinja provides:
 
 .. autoclass:: jinja2.DictLoader
 
+.. autoclass:: jinja2.SnapshotLoader
+    :members: publish, current_version, versions, list_templates
+
 .. autoclass:: jinja2.FunctionLoader
 
 .. autoclass:: jinja2.PrefixLoader

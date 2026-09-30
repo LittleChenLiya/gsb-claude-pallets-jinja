@@ -6,10 +6,13 @@ import importlib.util
 import os
 import posixpath
 import sys
+import threading
 import typing as t
 import weakref
 import zipimport
 from collections import abc
+from contextlib import contextmanager
+from contextvars import ContextVar
 from hashlib import sha1
 from importlib import import_module
 from types import ModuleType
@@ -451,6 +454,200 @@ class DictLoader(BaseLoader):
 
     def list_templates(self) -> list[str]:
         return sorted(self.mapping)
+
+
+_snapshot_pins: ContextVar[tuple[tuple["SnapshotLoader", int], ...]] = ContextVar(
+    "jinja2_snapshot_pins", default=()
+)
+
+
+class SnapshotLoader(BaseLoader):
+    """Loads templates from an immutable, atomically published snapshot of
+    a complete name-to-source mapping.
+
+    A snapshot is published with :meth:`publish`, which receives the
+    *complete* mapping of template names to sources for the new version.
+    Every template in the mapping is compiled first; only if all of them
+    compile successfully does the new snapshot replace the current one.
+    A failed publish raises and leaves the previous version fully
+    usable, and does not consume a version number.
+
+    Each top-level :meth:`Template.render` or :meth:`Template.render_async`
+    (and their streaming counterparts) pins the version its template was
+    loaded from, so all ``extends``, ``include``, and ``import`` lookups
+    during that render read from the same snapshot, even if a new version
+    is published concurrently. Streaming renders that have already started
+    keep reading the old snapshot until the generator is closed.
+
+    The environment's template cache is keyed by version in addition to
+    the loader, name, and per-environment configuration, so the same
+    template name loaded from different versions never collides.
+
+    >>> loader = SnapshotLoader({"index.html": "old", "item.html": "old"})
+    >>> env = Environment(loader=loader)
+    >>> env.get_template("index.html").render()
+    'old'
+    >>> loader.publish({"index.html": "new", "item.html": "new"}, env)
+    2
+    >>> env.get_template("index.html").render()
+    'new'
+
+    :param mapping: Optional initial mapping of template names to sources,
+        stored as version 1. It cannot be validated yet because no
+        environment is bound; prefer :meth:`publish` for validated updates.
+
+    .. versionadded:: 3.2
+    """
+
+    def __init__(self, mapping: t.Mapping[str, str] | None = None) -> None:
+        self._lock = threading.Lock()
+        self._versions: dict[int, dict[str, str]] = {}
+        self._current = 0
+        self._environment_ref: weakref.ref[Environment] | None = None
+
+        if mapping is not None:
+            self._versions[1] = dict(mapping)
+            self._current = 1
+
+    @property
+    def current_version(self) -> int:
+        """The version number of the currently active snapshot. ``0`` if
+        nothing has been published yet.
+        """
+        return self._current
+
+    def versions(self) -> list[int]:
+        """Return the sorted list of successfully published, queryable
+        version numbers. Failed publishes never appear here.
+        """
+        with self._lock:
+            return sorted(self._versions)
+
+    def publish(
+        self,
+        mapping: t.Mapping[str, str],
+        environment: "Environment | None" = None,
+    ) -> int:
+        """Validate and atomically publish a complete name-to-source
+        mapping as the new current snapshot.
+
+        All templates are compiled against the environment before anything
+        is swapped. If any template fails to compile, the exception is
+        raised, the previous version stays active, and no version number
+        is consumed. On success, returns the new monotonically increasing
+        version number.
+
+        :param mapping: Complete mapping of template names to sources for
+            the new version. It fully replaces the previous mapping.
+        :param environment: The environment used to validate the
+            templates. If not given, the environment this loader is
+            attached to is used, if one has loaded from it before.
+        """
+        env = environment
+
+        if env is None:
+            ref = self._environment_ref
+            env = ref() if ref is not None else None
+
+        if env is None:
+            raise RuntimeError(
+                "SnapshotLoader.publish needs an environment to validate"
+                " templates; pass environment=... or load a template first."
+            )
+
+        new_mapping = dict(mapping)
+
+        # Validate everything before swapping anything. Raises on the
+        # first template that does not compile.
+        for name, source in new_mapping.items():
+            env.compile(source, name, filename=f"<snapshot candidate>/{name}")
+
+        with self._lock:
+            version = self._current + 1
+            self._versions[version] = new_mapping
+            self._current = version
+            return version
+
+    def _pinned_version(self) -> int | None:
+        """The innermost version pinned for this loader in the current
+        execution context, or ``None`` if no render is in progress.
+        """
+        for loader, version in reversed(_snapshot_pins.get()):
+            if loader is self:
+                return version
+
+        return None
+
+    def _version_for_load(self) -> int:
+        """The version a lookup should read from: the pinned one if a
+        render is in progress, otherwise the current one.
+        """
+        pinned = self._pinned_version()
+
+        if pinned is not None:
+            return pinned
+
+        with self._lock:
+            return self._current
+
+    @contextmanager
+    def _pin(self, version: int | None = None) -> t.Iterator[int]:
+        """Pin a version for the duration of the with block in the current
+        execution context. Pins the current version if none is given.
+        """
+        if version is None:
+            with self._lock:
+                version = self._current
+
+        token = _snapshot_pins.set(_snapshot_pins.get() + ((self, version),))
+
+        try:
+            yield version
+        finally:
+            _snapshot_pins.reset(token)
+
+    def get_source(
+        self, environment: "Environment", template: str
+    ) -> tuple[str, str, t.Callable[[], bool]]:
+        self._environment_ref = weakref.ref(environment)
+        version = self._version_for_load()
+
+        try:
+            source = self._versions[version][template]
+        except KeyError:
+            raise TemplateNotFound(template) from None
+
+        # The filename carries the version so tracebacks and the bytecode
+        # cache distinguish identical names from different snapshots.
+        # Snapshots are immutable, so a cached template never goes stale.
+        return source, f"<snapshot v{version}>/{template}", lambda: True
+
+    @internalcode
+    def load(
+        self,
+        environment: "Environment",
+        name: str,
+        globals: t.MutableMapping[str, t.Any] | None = None,
+    ) -> "Template":
+        if self._pinned_version() is None:
+            # Ensure the cache key in the environment and the source read
+            # below observe one consistent version, even if a publish
+            # happens concurrently.
+            with self._pin():
+                template = super().load(environment, name, globals)
+                version = self._pinned_version()
+        else:
+            template = super().load(environment, name, globals)
+            version = self._pinned_version()
+
+        # Remember which snapshot this template was compiled from so its
+        # renders keep reading that snapshot.
+        template._snapshot_version = version  # type: ignore[attr-defined]
+        return template
+
+    def list_templates(self) -> list[str]:
+        with self._lock:
+            return sorted(self._versions.get(self._current, ()))
 
 
 class FunctionLoader(BaseLoader):

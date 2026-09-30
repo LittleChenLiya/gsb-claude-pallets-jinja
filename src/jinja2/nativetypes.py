@@ -9,6 +9,7 @@ from . import nodes
 from .compiler import CodeGenerator
 from .compiler import Frame
 from .compiler import has_safe_repr
+from .environment import _snapshot_pin
 from .environment import Environment
 from .environment import Template
 
@@ -105,9 +106,10 @@ class NativeTemplate(Template):
         ctx = self.new_context(dict(*args, **kwargs))
 
         try:
-            return self.environment_class.concat(  # type: ignore
-                self.root_render_func(ctx)
-            )
+            with _snapshot_pin(self):
+                return self.environment_class.concat(  # type: ignore
+                    self.root_render_func(ctx)
+                )
         except Exception:
             return self.environment.handle_exception()
 
@@ -120,9 +122,10 @@ class NativeTemplate(Template):
         ctx = self.new_context(dict(*args, **kwargs))
 
         try:
-            return self.environment_class.concat(  # type: ignore
-                [n async for n in self.root_render_func(ctx)]  # type: ignore
-            )
+            with _snapshot_pin(self):
+                return self.environment_class.concat(  # type: ignore
+                    [n async for n in self.root_render_func(ctx)]  # type: ignore
+                )
         except Exception:
             return self.environment.handle_exception()
 
