@@ -20,6 +20,7 @@ syntax. Then the template is passed data to render the final document.
     sandbox
     nativetypes
     templates
+    macrocheck
     extensions
     integration
     switching

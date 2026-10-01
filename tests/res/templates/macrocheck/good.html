@@ -1,0 +1,9 @@
+{% from "macrocheck/lib_a.html" import greet, full_name %}
+{% import "macrocheck/lib_b.html" as lib_b %}
+{{ greet("Ada") }}
+{{ greet("Ada", punct="?") }}
+{{ full_name("Ada", "Lovelace") }}
+{{ full_name(first="Ada", last="Lovelace") }}
+{{ lib_b.wave("Ada") }}
+{{ lib_b.farewell("Ada") }}
+

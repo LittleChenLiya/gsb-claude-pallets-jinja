@@ -10,6 +10,12 @@ Unreleased
 -   Update minimum Babel version to >= 2.17.
 -   Deprecate the ``__version__`` attribute. Use feature detection or
     ``importlib.metadata.version("jinja2")`` instead.
+-   Add ``jinja2.macrocheck``, a static macro contract checker that
+    collects macros, static import aliases, and call sites without
+    executing templates.  It reports missing, duplicate, and unknown
+    arguments with template name and line number, lists statically
+    undecidable calls as unknowns, and never calls filters, tests, or
+    user globals.
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.

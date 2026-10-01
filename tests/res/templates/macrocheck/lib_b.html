@@ -1,0 +1,4 @@
+{% import "macrocheck/lib_a.html" as lib_a %}
+{% macro farewell(name) %}Bye, {{ name }}{% endmacro %}
+{% macro wave(target) %}{{ lib_a.greet(target, "?") }}{% endmacro %}
+

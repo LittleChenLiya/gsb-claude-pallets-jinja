@@ -1,0 +1,8 @@
+{% import tpl_name as dyn %}
+{% macro local(a) %}{{ a }}{% endmacro %}
+{% set local = "shadowed" %}
+{{ local(1) }}
+{% macro packed(a, b) %}{{ a }}{{ b }}{% endmacro %}
+{{ packed(*args) }}
+{% call box.wrap() %}body{% endcall %}
+

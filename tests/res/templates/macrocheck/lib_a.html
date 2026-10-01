@@ -1,0 +1,5 @@
+{% macro greet(name, punct="!") %}Hello, {{ name }}{{ punct }}{% endmacro %}
+{% macro full_name(first, last) %}{{ first + " " + last }}{% endmacro %}
+{% from "macrocheck/lib_b.html" import farewell %}
+{% macro greet_and_farewell(name) %}{{ greet(name) }} / {{ farewell(name) }}{% endmacro %}
+
