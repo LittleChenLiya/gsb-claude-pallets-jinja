@@ -19,6 +19,9 @@ from .exceptions import TemplateRuntimeError as TemplateRuntimeError
 from .exceptions import TemplatesNotFound as TemplatesNotFound
 from .exceptions import TemplateSyntaxError as TemplateSyntaxError
 from .exceptions import UndefinedError as UndefinedError
+from .loader_explain import explain_load as explain_load
+from .loader_explain import ExplainNode as ExplainNode
+from .loader_explain import LoadExplanation as LoadExplanation
 from .loaders import BaseLoader as BaseLoader
 from .loaders import ChoiceLoader as ChoiceLoader
 from .loaders import DictLoader as DictLoader

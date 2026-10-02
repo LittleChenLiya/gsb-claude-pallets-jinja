@@ -104,6 +104,22 @@ class BaseLoader:
         """
         raise TypeError("this loader cannot iterate over all templates")
 
+    def explain(
+        self, name: str, adapters: t.Mapping[t.Any, t.Callable[..., t.Any]] | None = None
+    ) -> t.Any:
+        """Explain how this loader would resolve the template ``name``,
+        without rendering anything or calling :meth:`get_source` on
+        loaders that don't support read-only introspection.
+
+        Shortcut for :func:`jinja2.explain_load`. Returns a
+        :class:`jinja2.loader_explain.LoadExplanation`.
+
+        .. versionadded:: 3.2
+        """
+        from .loader_explain import explain_load
+
+        return explain_load(self, name, adapters=adapters)
+
     @internalcode
     def load(
         self,

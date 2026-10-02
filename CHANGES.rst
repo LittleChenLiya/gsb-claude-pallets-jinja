@@ -13,6 +13,10 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Add ``explain_load`` (and ``BaseLoader.explain``), a read-only API
+    that reports which sources a template name would be tried against,
+    which are shadowed, and which one wins, without rendering or calling
+    ``get_source`` on loaders that can't be inspected safely.
 
 
 Version 3.1.6
