@@ -917,3 +917,57 @@ returned by the :meth:`Environment.parse` method.
 .. autofunction:: jinja2.meta.find_undeclared_variables
 
 .. autofunction:: jinja2.meta.find_referenced_templates
+
+The Macro Contract Exporter
+---------------------------
+
+.. versionadded:: 3.2
+
+The macro contract exporter inspects the abstract syntax tree of a
+template *without executing any of it*.  It reports the contract of
+every macro: its name, the ordered list of parameters, the source
+position of every default expression, whether the macro receives a
+``caller`` and whether it reads the special ``kwargs`` / ``varargs``
+catch-all parameters.  This is useful for documentation tools, IDE
+integration and static analysis.
+
+The rules mirror the ones the compiler applies internally: defaults are
+aligned to the *end* of the parameter list, an explicit ``caller``
+parameter must be omitted or given a default, and a body that reads
+``caller`` / ``kwargs`` / ``varargs`` without declaring them gets the
+corresponding implicit special parameter.  Nested macros and macros
+that share a name are reported as separate entries, each with its own
+scope, in declaration order.
+
+Default expressions are never evaluated (a default such as
+``suffix=make_suffix()`` is reported with its source position without
+calling ``make_suffix``), and dynamic includes are only marked as
+unknown instead of being loaded or inferred.
+
+.. autofunction:: jinja2.contracts.export_macro_contracts
+
+.. autofunction:: jinja2.contracts.macro_contracts
+
+.. autoclass:: jinja2.contracts.ContractReport
+    :members:
+
+.. autoclass:: jinja2.contracts.MacroContract
+    :members:
+
+.. autoclass:: jinja2.contracts.MacroParam
+    :members:
+
+.. autoclass:: jinja2.contracts.DynamicInclude
+    :members:
+
+.. autoclass:: jinja2.contracts.ContractError
+    :members:
+
+The same report is available from the command line::
+
+    python -m jinja2 template.html
+    python -m jinja2 template.html --json
+
+The first form prints a human readable report, the second a JSON
+document.  The command exits with a non-zero status when the template
+contains a syntax error.
