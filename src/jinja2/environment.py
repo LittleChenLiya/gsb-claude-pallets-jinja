@@ -59,6 +59,7 @@ if t.TYPE_CHECKING:
     import typing_extensions as te
 
     from .bccache import BytecodeCache
+    from .bccache import PreparedTemplateBatch
     from .ext import Extension
     from .loaders import BaseLoader
 
@@ -894,6 +895,28 @@ class Environment:
                 zip_file.close()
 
         log_function("Finished compiling templates")
+
+    def prepare_template_batch(self, names: t.Iterable[str]) -> "PreparedTemplateBatch":
+        """Compile a batch of templates into a staging area without writing
+        to the configured :attr:`bytecode_cache`.
+
+        `names` is an iterable of explicit template names.  Only the named
+        templates are compiled; dependencies such as imported or included
+        templates are not followed.  If any template fails to compile, the
+        exception propagates and nothing is staged.
+
+        Call :meth:`~jinja2.bccache.PreparedTemplateBatch.commit` on the
+        returned batch to publish the compiled templates to the cache.  If a
+        template's source or the compile configuration changed in the
+        meantime, the commit is rejected with
+        :class:`~jinja2.TemplateBatchError` and the cache is left untouched.
+
+        .. versionadded:: 3.2
+        """
+        if self.bytecode_cache is None:
+            raise RuntimeError("no bytecode cache configured for this environment")
+
+        return self.bytecode_cache.prepare_template_batch(self, names)
 
     def list_templates(
         self,

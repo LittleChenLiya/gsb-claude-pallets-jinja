@@ -144,6 +144,17 @@ class TemplateAssertionError(TemplateSyntaxError):
     """
 
 
+class TemplateBatchError(TemplateError):
+    """Raised if a prepared template batch cannot be committed to the
+    bytecode cache.
+
+    This happens if a template's source or the compile configuration
+    changed between :meth:`~jinja2.BytecodeCache.prepare_template_batch`
+    and :meth:`~jinja2.bccache.PreparedTemplateBatch.commit`.  The whole
+    batch is rejected, nothing is written to the cache.
+    """
+
+
 class TemplateRuntimeError(TemplateError):
     """A generic runtime error in the template engine.  Under some situations
     Jinja may raise this exception.

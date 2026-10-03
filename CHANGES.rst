@@ -13,6 +13,13 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Add ``BytecodeCache.prepare_template_batch`` (and the equivalent
+    :meth:`Environment.prepare_template_batch`) to compile an explicit list
+    of templates into a staging area without touching the cache, and
+    ``PreparedTemplateBatch.commit`` to publish them all at once.  If a
+    template's source or the compile configuration changed after prepare,
+    the whole batch is rejected and the cache is left untouched.  Templates
+    are only compiled, never executed.
 
 
 Version 3.1.6

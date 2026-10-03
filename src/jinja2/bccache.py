@@ -15,9 +15,12 @@ import stat
 import sys
 import tempfile
 import typing as t
+from dataclasses import dataclass
 from hashlib import sha1
 from io import BytesIO
 from types import CodeType
+
+from .exceptions import TemplateBatchError
 
 if t.TYPE_CHECKING:
     import typing_extensions as te
@@ -96,6 +99,147 @@ class Bucket:
         out = BytesIO()
         self.write_bytecode(out)
         return out.getvalue()
+
+
+def _compile_fingerprint(environment: "Environment") -> tuple[t.Any, ...]:
+    """Return a hashable fingerprint of the compile-relevant configuration
+    of the environment.  If any of these values change between prepare and
+    commit, the compiled bytecode might be incompatible and the batch must
+    be rejected.
+    """
+    try:
+        from importlib.metadata import version
+
+        jinja_version = version("jinja2")
+    except Exception:
+        jinja_version = "unknown"
+
+    return (
+        jinja_version,
+        environment.is_async,
+        environment.optimized,
+        getattr(environment, "sandboxed", False),
+        environment.finalize,
+        environment.block_start_string,
+        environment.block_end_string,
+        environment.variable_start_string,
+        environment.variable_end_string,
+        environment.comment_start_string,
+        environment.comment_end_string,
+        environment.line_statement_prefix,
+        environment.line_comment_prefix,
+        environment.trim_blocks,
+        environment.lstrip_blocks,
+        environment.newline_sequence,
+        environment.keep_trailing_newline,
+        tuple(sorted(environment.extensions)),
+        tuple(
+            (type(ext).__module__, type(ext).__qualname__)
+            for ext in environment.extensions.values()
+        ),
+    )
+
+
+@dataclass
+class _BatchItem:
+    name: str
+    filename: str | None
+    checksum: str
+    bucket: Bucket
+
+
+class PreparedTemplateBatch:
+    """A staging area for a batch of templates that were compiled ahead of
+    time without touching the real bytecode cache.
+
+    Create a batch with
+    :meth:`BytecodeCache.prepare_template_batch` (or
+    :meth:`Environment.prepare_template_batch`), then call :meth:`commit`
+    once all templates are prepared::
+
+        batch = bytecode_cache.prepare_template_batch(env, ["a.html", "b.html"])
+        batch.commit()
+
+    The prepare phase only compiles the explicitly named templates into
+    memory; dependencies such as imported or included templates are not
+    followed and the cache is not modified.  If any template fails to
+    compile, the exception propagates and nothing is staged.
+
+    :meth:`commit` fetches every template's source again and compares it to
+    the checksum recorded at prepare time, and also compares the compile
+    configuration.  If anything changed, the whole batch is rejected with
+    :class:`~jinja2.TemplateBatchError`: nothing is written to the cache and
+    existing cache entries stay untouched.
+
+    Templates are only compiled, never executed, so global functions or
+    render expressions in the template source are not run by prepare or
+    commit.
+    """
+
+    def __init__(self, cache: "BytecodeCache", environment: "Environment") -> None:
+        self.cache = cache
+        self.environment = environment
+        self._items: dict[str, _BatchItem] = {}
+        self._fingerprint = _compile_fingerprint(environment)
+        self.committed = False
+
+    def add(self, name: str) -> None:
+        """Compile the template `name` into the staging area.
+
+        Only the named template is compiled; dependencies such as imported
+        or included templates are not followed.  The template is only
+        compiled, never executed, so global functions or render expressions
+        in the source are not run.
+        """
+        if self.committed:
+            raise TemplateBatchError("batch was already committed")
+        if self.environment.loader is None:
+            raise TypeError("no loader for this environment specified")
+        source, filename, _ = self.environment.loader.get_source(self.environment, name)
+        checksum = self.cache.get_source_checksum(source)
+        bucket = Bucket(
+            self.environment, self.cache.get_cache_key(name, filename), checksum
+        )
+        # Compile the source to bytecode.  This parses and generates code
+        # but never executes the template, so no global functions or render
+        # expressions are invoked.
+        bucket.code = self.environment.compile(source, name, filename)
+        self._items[name] = _BatchItem(name, filename, checksum, bucket)
+
+    def commit(self) -> None:
+        """Publish all compiled templates to the bytecode cache.
+
+        Before publishing, every template's source is fetched again and
+        compared to the checksum recorded at prepare time, and the compile
+        configuration is compared as well.  If anything changed, the whole
+        batch is rejected: nothing is written to the cache and existing
+        cache entries stay untouched.
+        """
+        if self.committed:
+            raise TemplateBatchError("batch was already committed")
+        if not self._items:
+            raise TemplateBatchError("cannot commit an empty template batch")
+        if self.environment.loader is None:
+            raise TypeError("no loader for this environment specified")
+        if _compile_fingerprint(self.environment) != self._fingerprint:
+            raise TemplateBatchError(
+                "compile configuration changed after prepare; the batch was"
+                " rejected, nothing was written to the cache"
+            )
+        for item in self._items.values():
+            source, filename, _ = self.environment.loader.get_source(
+                self.environment, item.name
+            )
+            if filename != item.filename or (
+                self.cache.get_source_checksum(source) != item.checksum
+            ):
+                raise TemplateBatchError(
+                    f"source of template {item.name!r} changed after prepare;"
+                    " the batch was rejected, nothing was written to the cache"
+                )
+        for item in self._items.values():
+            self.cache.set_bucket(item.bucket)
+        self.committed = True
 
 
 class BytecodeCache:
@@ -179,6 +323,36 @@ class BytecodeCache:
     def set_bucket(self, bucket: Bucket) -> None:
         """Put the bucket into the cache."""
         self.dump_bytecode(bucket)
+
+    def prepare_template_batch(
+        self,
+        environment: "Environment",
+        names: t.Iterable[str],
+    ) -> PreparedTemplateBatch:
+        """Compile a batch of templates into a staging area without writing
+        to the cache.
+
+        `names` is an iterable of explicit template names.  Only the named
+        templates are compiled; dependencies such as imported or included
+        templates are not followed.  If any template fails to compile, the
+        exception propagates and nothing is staged.
+
+        Call :meth:`~PreparedTemplateBatch.commit` on the returned batch to
+        publish the compiled templates to the cache.  If a template's source
+        or the compile configuration changed in the meantime, the commit is
+        rejected with :class:`~jinja2.TemplateBatchError` and the cache is
+        left untouched.
+
+        .. versionadded:: 3.2
+        """
+        if isinstance(names, str):
+            raise TypeError(
+                "names must be an iterable of template names, not a single string"
+            )
+        batch = PreparedTemplateBatch(self, environment)
+        for name in names:
+            batch.add(name)
+        return batch
 
 
 class FileSystemBytecodeCache(BytecodeCache):

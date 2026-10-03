@@ -473,7 +473,7 @@ the application.
 To use a bytecode cache, instantiate it and pass it to the :class:`Environment`.
 
 .. autoclass:: jinja2.BytecodeCache
-    :members: load_bytecode, dump_bytecode, clear
+    :members: load_bytecode, dump_bytecode, clear, prepare_template_batch
 
 .. autoclass:: jinja2.bccache.Bucket
     :members: write_bytecode, load_bytecode, bytecode_from_string,
@@ -491,6 +491,43 @@ To use a bytecode cache, instantiate it and pass it to the :class:`Environment`.
 
         The bytecode if it's loaded, otherwise `None`.
 
+
+Preparing a batch ahead of time
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If many templates are compiled at once (for example when a web application
+starts up), a syntax error in one template should not leave a half-written
+cache.  :meth:`~jinja2.BytecodeCache.prepare_template_batch` compiles an
+explicit list of templates into a staging area without touching the real
+cache.  Only the named templates are compiled, dependencies such as
+imported or included templates are not followed, and templates are only
+compiled, never executed, so global functions or render expressions in the
+source are not run.
+
+Call :meth:`~jinja2.bccache.PreparedTemplateBatch.commit` on the returned
+batch to publish all compiled templates to the cache in one go.  Before
+publishing, every template's source is fetched again and compared to the
+checksum recorded at prepare time, and the compile configuration is
+compared as well.  If anything changed, the whole batch is rejected with
+:class:`~jinja2.TemplateBatchError`: nothing is written to the cache and
+existing cache entries stay untouched.
+
+.. code-block:: python
+
+    batch = bytecode_cache.prepare_template_batch(env, ["a.html", "b.html"])
+    batch.commit()
+
+.. autoclass:: jinja2.bccache.PreparedTemplateBatch
+    :members: add, commit
+
+    .. attribute:: committed
+
+        `True` once :meth:`commit` published the batch, `False` otherwise.
+
+The same functionality is available on the environment itself if a bytecode
+cache is configured:
+
+.. automethod:: jinja2.Environment.prepare_template_batch
 
 Builtin bytecode caches:
 
