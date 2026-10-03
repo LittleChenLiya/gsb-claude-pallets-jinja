@@ -104,6 +104,27 @@ class BaseLoader:
         """
         raise TypeError("this loader cannot iterate over all templates")
 
+    def explain(
+        self,
+        environment: "Environment",
+        template: str,
+        adapters: t.Mapping[type, "LoaderExplainAdapter"] | None = None,
+    ) -> "LoaderTry":
+        """Explain which sources this loader would try for *template*,
+        without rendering the template.
+
+        This is a shortcut for :func:`explain_loader`.  It returns a
+        :class:`LoaderTry` tree that preserves the order in which sources
+        are tried, marks sources that are shadowed by an earlier hit, and
+        records the final hit.
+
+        Custom loaders are not inspected by calling their ``get_source``
+        method.  Provide a :class:`LoaderExplainAdapter` for them via
+        *adapters*; loaders without an adapter are recorded as
+        :data:`EXPLAIN_UNSUPPORTED`.
+        """
+        return explain_loader(self, environment, template, adapters)
+
     @internalcode
     def load(
         self,
@@ -147,6 +168,377 @@ class BaseLoader:
         return environment.template_class.from_code(
             environment, code, globals, uptodate
         )
+
+
+# ---------------------------------------------------------------------------
+# Loader explain
+# ---------------------------------------------------------------------------
+
+#: The loader would find the template.
+EXPLAIN_HIT = "hit"
+#: The loader would not find the template.
+EXPLAIN_MISS = "miss"
+#: The loader was not tried because an earlier loader already hit.
+EXPLAIN_SHADOWED = "shadowed"
+#: The loader cannot be inspected because no explain adapter is registered.
+EXPLAIN_UNSUPPORTED = "unsupported"
+#: The explain adapter for the loader raised an exception.
+EXPLAIN_ERROR = "error"
+
+
+class LoaderExplainAdapter:
+    """Adapters teach :func:`explain_loader` how to inspect a loader without
+    calling its ``get_source`` method.
+
+    This is intended for custom loaders.  Instead of guessing what the
+    loader would do by calling :meth:`BaseLoader.get_source` (which may have
+    side effects such as counting calls or doing network I/O), an adapter
+    is called with the same arguments and returns a :class:`LoaderTry`
+    describing the result.
+
+    >>> class MyAdapter(LoaderExplainAdapter):
+    ...     def explain(self, loader, environment, template):
+    ...         if template in loader.templates:
+    ...             return LoaderTry(loader, template, EXPLAIN_HIT)
+    ...         return LoaderTry(loader, template, EXPLAIN_MISS)
+    """
+
+    def explain(
+        self,
+        loader: "BaseLoader",
+        environment: "Environment",
+        template: str,
+    ) -> "LoaderTry":
+        raise NotImplementedError()
+
+
+class LoaderTry:
+    """A single attempt in an explanation tree.
+
+    Returned by :func:`explain_loader`.  Each node describes one loader being
+    asked for one name.  Composite loaders (such as :class:`ChoiceLoader` and
+    :class:`PrefixLoader`) have :attr:`children` describing the loaders they
+    delegate to.
+
+    Attributes:
+        loader: the loader that made the attempt.
+        name: the name the loader was asked for.  This may differ from the
+            name passed to :func:`explain_loader` because a
+            :class:`PrefixLoader` strips the prefix before delegating.
+        status: one of :data:`EXPLAIN_HIT`, :data:`EXPLAIN_MISS`,
+            :data:`EXPLAIN_SHADOWED`, :data:`EXPLAIN_UNSUPPORTED` or
+            :data:`EXPLAIN_ERROR`.
+        children: attempts made by sub-loaders.
+        message: an optional human readable explanation of the result.
+    """
+
+    __slots__ = ("loader", "name", "status", "children", "message")
+
+    def __init__(
+        self,
+        loader: "BaseLoader",
+        name: str,
+        status: str,
+        children: t.Sequence["LoaderTry"] = (),
+        message: str | None = None,
+    ) -> None:
+        self.loader = loader
+        self.name = name
+        self.status = status
+        self.children = tuple(children)
+        self.message = message
+
+    @property
+    def hit(self) -> bool:
+        """`True` if the loader would find the template."""
+        return self.status == EXPLAIN_HIT
+
+    def iter_tries(self) -> t.Iterator["LoaderTry"]:
+        """Iterate over all attempts in the tree, depth first."""
+        yield self
+        for child in self.children:
+            yield from child.iter_tries()
+
+    def render(self) -> str:
+        """Render the tree as a human readable string, showing the order in
+        which loaders are tried, name changes and shadowing.
+        """
+        lines: list[str] = []
+        self._render(lines, 0)
+        return "\n".join(lines)
+
+    def _render(self, lines: list[str], depth: int) -> None:
+        indent = "  " * depth
+        label = f"{indent}{type(self.loader).__name__}({self.name!r}) -> {self.status}"
+        if self.message:
+            label += f"  [{self.message}]"
+        lines.append(label)
+        for child in self.children:
+            child._render(lines, depth + 1)
+
+    def __repr__(self) -> str:
+        return (
+            f"LoaderTry({type(self.loader).__name__}, {self.name!r}, {self.status!r})"
+        )
+
+
+class _DictLoaderExplainAdapter(LoaderExplainAdapter):
+    def explain(
+        self,
+        loader: "DictLoader",
+        environment: "Environment",
+        template: str,
+    ) -> LoaderTry:
+        if template in loader.mapping:
+            return LoaderTry(loader, template, EXPLAIN_HIT, message="found in mapping")
+        return LoaderTry(loader, template, EXPLAIN_MISS, message="not in mapping")
+
+
+class _FileSystemLoaderExplainAdapter(LoaderExplainAdapter):
+    def explain(
+        self,
+        loader: "FileSystemLoader",
+        environment: "Environment",
+        template: str,
+    ) -> LoaderTry:
+        pieces = split_template_path(template)
+        children: list[LoaderTry] = []
+        status = EXPLAIN_MISS
+
+        for searchpath in loader.searchpath:
+            filename = posixpath.join(searchpath, *pieces)
+
+            if os.path.isfile(filename):
+                children.append(
+                    LoaderTry(loader, filename, EXPLAIN_HIT, message="file exists")
+                )
+                status = EXPLAIN_HIT
+                break
+
+            children.append(
+                LoaderTry(loader, filename, EXPLAIN_MISS, message="no such file")
+            )
+
+        if status == EXPLAIN_HIT:
+            message = (
+                f"found in search path {len(children)} of {len(loader.searchpath)}"
+            )
+        else:
+            message = f"not found in any of {len(loader.searchpath)} search paths"
+
+        return LoaderTry(loader, template, status, children=children, message=message)
+
+
+class _PackageLoaderExplainAdapter(LoaderExplainAdapter):
+    def explain(
+        self,
+        loader: "PackageLoader",
+        environment: "Environment",
+        template: str,
+    ) -> LoaderTry:
+        p = os.path.normpath(
+            posixpath.join(loader._template_root, *split_template_path(template))
+        )
+
+        if loader._archive is None:
+            exists = os.path.isfile(p)
+        else:
+            names = {
+                name.replace("/", os.sep)
+                for name in _get_zipimporter_files(loader._loader)
+            }
+            exists = p in names
+
+        if exists:
+            return LoaderTry(loader, template, EXPLAIN_HIT, message=f"found at {p}")
+        return LoaderTry(loader, template, EXPLAIN_MISS, message=f"not found at {p}")
+
+
+class _ModuleLoaderExplainAdapter(LoaderExplainAdapter):
+    def explain(
+        self,
+        loader: "ModuleLoader",
+        environment: "Environment",
+        template: str,
+    ) -> LoaderTry:
+        filename = ModuleLoader.get_module_filename(template)
+        paths = [os.path.join(p, filename) for p in loader.module.__path__]
+
+        for path in paths:
+            if os.path.isfile(path):
+                return LoaderTry(
+                    loader,
+                    template,
+                    EXPLAIN_HIT,
+                    message=f"compiled template exists at {path}",
+                )
+
+        return LoaderTry(
+            loader, template, EXPLAIN_MISS, message="no compiled template module"
+        )
+
+
+#: Built-in adapters used when no user adapter is registered for a loader.
+_DEFAULT_EXPLAIN_ADAPTERS: dict[type, LoaderExplainAdapter] = {}
+
+
+def explain_loader(
+    loader: "BaseLoader",
+    environment: "Environment",
+    template: str,
+    adapters: t.Mapping[type, LoaderExplainAdapter] | None = None,
+) -> LoaderTry:
+    """Explain which sources *loader* would try for *template*, without
+    rendering the template.
+
+    Returns a :class:`LoaderTry` tree.  The tree preserves the order in which
+    composite loaders try their children, marks children that are shadowed by
+    an earlier hit, and records the final hit.  The name stored on each node
+    is the name that loader was actually asked for, so prefix stripping is
+    visible in the tree.
+
+    Custom loaders are not inspected by calling their ``get_source`` method.
+    Provide a :class:`LoaderExplainAdapter` for them via *adapters*; loaders
+    without an adapter are recorded as :data:`EXPLAIN_UNSUPPORTED`.
+
+    :param adapters: an optional mapping of loader classes to adapters.  User
+        adapters take precedence over the built-in adapters and are matched
+        with :func:`isinstance` semantics.
+    """
+    return _explain_loader(loader, environment, template, dict(adapters or {}))
+
+
+def _explain_loader(
+    loader: "BaseLoader",
+    environment: "Environment",
+    template: str,
+    adapters: dict[type, LoaderExplainAdapter],
+) -> LoaderTry:
+    if isinstance(loader, ChoiceLoader):
+        return _explain_choice_loader(loader, environment, template, adapters)
+
+    if isinstance(loader, PrefixLoader):
+        return _explain_prefix_loader(loader, environment, template, adapters)
+
+    return _explain_leaf_loader(loader, environment, template, adapters)
+
+
+def _explain_choice_loader(
+    loader: "ChoiceLoader",
+    environment: "Environment",
+    template: str,
+    adapters: dict[type, LoaderExplainAdapter],
+) -> LoaderTry:
+    children: list[LoaderTry] = []
+    shadowed = False
+
+    for sub in loader.loaders:
+        if shadowed:
+            # A loader already hit, the rest would never be called.
+            children.append(
+                LoaderTry(
+                    sub,
+                    template,
+                    EXPLAIN_SHADOWED,
+                    message="shadowed by an earlier hit",
+                )
+            )
+            continue
+
+        child = _explain_loader(sub, environment, template, adapters)
+        children.append(child)
+
+        if child.hit:
+            shadowed = True
+
+    status = EXPLAIN_HIT if shadowed else EXPLAIN_MISS
+    return LoaderTry(loader, template, status, children=children)
+
+
+def _explain_prefix_loader(
+    loader: "PrefixLoader",
+    environment: "Environment",
+    template: str,
+    adapters: dict[type, LoaderExplainAdapter],
+) -> LoaderTry:
+    try:
+        prefix, name = template.split(loader.delimiter, 1)
+        sub = loader.mapping[prefix]
+    except ValueError:
+        return LoaderTry(
+            loader,
+            template,
+            EXPLAIN_MISS,
+            message=f"name does not contain delimiter {loader.delimiter!r}",
+        )
+    except KeyError:
+        return LoaderTry(
+            loader,
+            template,
+            EXPLAIN_MISS,
+            message=f"no loader registered for prefix {prefix!r}",
+        )
+
+    # Only the matching branch is entered, with the prefix stripped.  The
+    # stripped name must not leak into any other branch.
+    child = _explain_loader(sub, environment, name, adapters)
+    return LoaderTry(
+        loader,
+        template,
+        child.status,
+        children=[child],
+        message=f"prefix {prefix!r} delegates {template!r} to {name!r}",
+    )
+
+
+def _explain_leaf_loader(
+    loader: "BaseLoader",
+    environment: "Environment",
+    template: str,
+    adapters: dict[type, LoaderExplainAdapter],
+) -> LoaderTry:
+    adapter = _find_explain_adapter(loader, adapters)
+
+    if adapter is None:
+        return LoaderTry(
+            loader,
+            template,
+            EXPLAIN_UNSUPPORTED,
+            message=f"no explain adapter for {type(loader).__name__}",
+        )
+
+    try:
+        node = adapter.explain(loader, environment, template)
+    except Exception as e:
+        return LoaderTry(
+            loader,
+            template,
+            EXPLAIN_ERROR,
+            message=f"adapter raised {type(e).__name__}: {e}",
+        )
+
+    if not isinstance(node, LoaderTry):
+        return LoaderTry(
+            loader,
+            template,
+            EXPLAIN_ERROR,
+            message="adapter did not return a LoaderTry",
+        )
+
+    return node
+
+
+def _find_explain_adapter(
+    loader: "BaseLoader", adapters: dict[type, LoaderExplainAdapter]
+) -> LoaderExplainAdapter | None:
+    for cls in type(loader).__mro__:
+        if cls in adapters:
+            return adapters[cls]
+
+        if cls in _DEFAULT_EXPLAIN_ADAPTERS:
+            return _DEFAULT_EXPLAIN_ADAPTERS[cls]
+
+    return None
 
 
 class FileSystemLoader(BaseLoader):
@@ -683,3 +1075,13 @@ class ModuleLoader(BaseLoader):
         return environment.template_class.from_module_dict(
             environment, mod.__dict__, globals
         )
+
+
+_DEFAULT_EXPLAIN_ADAPTERS.update(
+    {
+        DictLoader: _DictLoaderExplainAdapter(),
+        FileSystemLoader: _FileSystemLoaderExplainAdapter(),
+        PackageLoader: _PackageLoaderExplainAdapter(),
+        ModuleLoader: _ModuleLoaderExplainAdapter(),
+    }
+)

@@ -22,8 +22,16 @@ from .exceptions import UndefinedError as UndefinedError
 from .loaders import BaseLoader as BaseLoader
 from .loaders import ChoiceLoader as ChoiceLoader
 from .loaders import DictLoader as DictLoader
+from .loaders import EXPLAIN_ERROR as EXPLAIN_ERROR
+from .loaders import EXPLAIN_HIT as EXPLAIN_HIT
+from .loaders import explain_loader as explain_loader
+from .loaders import EXPLAIN_MISS as EXPLAIN_MISS
+from .loaders import EXPLAIN_SHADOWED as EXPLAIN_SHADOWED
+from .loaders import EXPLAIN_UNSUPPORTED as EXPLAIN_UNSUPPORTED
 from .loaders import FileSystemLoader as FileSystemLoader
 from .loaders import FunctionLoader as FunctionLoader
+from .loaders import LoaderExplainAdapter as LoaderExplainAdapter
+from .loaders import LoaderTry as LoaderTry
 from .loaders import ModuleLoader as ModuleLoader
 from .loaders import PackageLoader as PackageLoader
 from .loaders import PrefixLoader as PrefixLoader

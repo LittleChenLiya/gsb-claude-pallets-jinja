@@ -11,9 +11,22 @@ from pathlib import Path
 
 import pytest
 
+from jinja2 import BaseLoader
+from jinja2 import ChoiceLoader
+from jinja2 import DictLoader
 from jinja2 import Environment
+from jinja2 import EXPLAIN_ERROR
+from jinja2 import EXPLAIN_HIT
+from jinja2 import explain_loader
+from jinja2 import EXPLAIN_MISS
+from jinja2 import EXPLAIN_SHADOWED
+from jinja2 import EXPLAIN_UNSUPPORTED
+from jinja2 import FileSystemLoader
+from jinja2 import LoaderExplainAdapter
 from jinja2 import loaders
+from jinja2 import LoaderTry
 from jinja2 import PackageLoader
+from jinja2 import PrefixLoader
 from jinja2.exceptions import TemplateNotFound
 from jinja2.loaders import split_template_path
 
@@ -434,3 +447,172 @@ def test_pep_451_import_hook():
 def test_package_loader_no_dir() -> None:
     with pytest.raises(ValueError, match="could not find a 'templates' directory"):
         PackageLoader("jinja2")
+
+
+class TestLoaderExplain:
+    def test_choice_loader_shadowing(self):
+        # Both loaders have x.html, only the first one hits.
+        loader = ChoiceLoader(
+            [DictLoader({"x.html": "A"}), DictLoader({"x.html": "B"})]
+        )
+        tree = loader.explain(Environment(), "x.html")
+        assert tree.status == EXPLAIN_HIT
+        assert tree.hit
+        assert [t.status for t in tree.iter_tries()] == [
+            EXPLAIN_HIT,
+            EXPLAIN_HIT,
+            EXPLAIN_SHADOWED,
+        ]
+        assert tree.children[1].status == EXPLAIN_SHADOWED
+        assert "shadowed" in tree.children[1].message
+
+    def test_choice_loader_miss_keeps_tried_paths(self):
+        loader = ChoiceLoader([DictLoader({}), DictLoader({})])
+        tree = loader.explain(Environment(), "missing.html")
+        assert tree.status == EXPLAIN_MISS
+        assert tree.hit is False
+        assert [t.status for t in tree.children] == [EXPLAIN_MISS, EXPLAIN_MISS]
+        # The tried name is preserved on every child.
+        assert [t.name for t in tree.children] == ["missing.html", "missing.html"]
+
+    def test_prefix_loader_strips_name_and_enters_matching_branch(self):
+        loader = PrefixLoader(
+            {"a": DictLoader({"x.html": "A"}), "b": DictLoader({"y.html": "B"})}
+        )
+        tree = loader.explain(Environment(), "a/x.html")
+        assert tree.status == EXPLAIN_HIT
+        # Only the matching branch is entered.
+        assert len(tree.children) == 1
+        child = tree.children[0]
+        assert child.name == "x.html"
+        assert child.status == EXPLAIN_HIT
+        # The stripped name must not leak into the other branch.
+        rendered = tree.render()
+        assert "b" not in rendered
+        assert "x.html" in rendered
+
+    def test_prefix_loader_missing_prefix(self):
+        loader = PrefixLoader({"a": DictLoader({})})
+        tree = loader.explain(Environment(), "b/x.html")
+        assert tree.status == EXPLAIN_MISS
+        assert tree.children == ()
+        assert "b" in tree.message
+
+    def test_prefix_loader_no_delimiter(self):
+        loader = PrefixLoader({"a": DictLoader({})})
+        tree = loader.explain(Environment(), "x.html")
+        assert tree.status == EXPLAIN_MISS
+        assert tree.children == ()
+        assert "delimiter" in tree.message
+
+    def test_nested_composite(self):
+        loader = ChoiceLoader(
+            [
+                PrefixLoader({"a": DictLoader({"x.html": "A"})}),
+                DictLoader({"x.html": "B"}),
+            ]
+        )
+
+        # With a prefix, the PrefixLoader branch hits and the second branch
+        # is shadowed.
+        tree = loader.explain(Environment(), "a/x.html")
+        assert tree.status == EXPLAIN_HIT
+        prefix_try = tree.children[0]
+        assert isinstance(prefix_try.loader, PrefixLoader)
+        assert prefix_try.children[0].name == "x.html"
+        assert prefix_try.children[0].status == EXPLAIN_HIT
+        assert tree.children[1].status == EXPLAIN_SHADOWED
+
+        # Without a prefix, the first branch misses and the second hits.
+        tree = loader.explain(Environment(), "x.html")
+        assert tree.status == EXPLAIN_HIT
+        assert tree.children[0].status == EXPLAIN_MISS
+        assert tree.children[1].status == EXPLAIN_HIT
+
+    def test_custom_loader_unsupported_does_not_call_get_source(self):
+        class CountingLoader(BaseLoader):
+            def __init__(self):
+                self.calls = 0
+
+            def get_source(self, environment, template):
+                self.calls += 1
+                raise RuntimeError("boom")
+
+        custom = CountingLoader()
+        loader = ChoiceLoader([custom, DictLoader({"x.html": "A"})])
+        tree = loader.explain(Environment(), "x.html")
+        assert tree.children[0].status == EXPLAIN_UNSUPPORTED
+        assert "CountingLoader" in tree.children[0].message
+        # get_source was never called, the counter stays at 0.
+        assert custom.calls == 0
+        # Explaining more names must not call it either.
+        loader.explain(Environment(), "x.html")
+        loader.explain(Environment(), "other.html")
+        assert custom.calls == 0
+
+    def test_custom_loader_with_adapter(self):
+        class CustomLoader(BaseLoader):
+            templates = {"x.html": "A"}
+
+            def get_source(self, environment, template):
+                raise TemplateNotFound(template)
+
+        class CustomAdapter(LoaderExplainAdapter):
+            def explain(self, loader, environment, template):
+                if template in loader.templates:
+                    return LoaderTry(loader, template, EXPLAIN_HIT)
+                return LoaderTry(loader, template, EXPLAIN_MISS)
+
+        loader = ChoiceLoader([CustomLoader(), DictLoader({"y.html": "B"})])
+        tree = loader.explain(
+            Environment(), "x.html", adapters={CustomLoader: CustomAdapter()}
+        )
+        assert tree.children[0].status == EXPLAIN_HIT
+
+        tree = loader.explain(
+            Environment(), "y.html", adapters={CustomLoader: CustomAdapter()}
+        )
+        assert tree.children[0].status == EXPLAIN_MISS
+        assert tree.children[1].status == EXPLAIN_HIT
+
+    def test_adapter_error(self):
+        class BadAdapter(LoaderExplainAdapter):
+            def explain(self, loader, environment, template):
+                raise RuntimeError("boom")
+
+        loader = DictLoader({"x.html": "A"})
+        tree = loader.explain(
+            Environment(), "x.html", adapters={DictLoader: BadAdapter()}
+        )
+        assert tree.status == EXPLAIN_ERROR
+        assert "boom" in tree.message
+
+    def test_filesystem_loader_explain(self, tmp_path):
+        (tmp_path / "x.html").write_text("A")
+        loader = FileSystemLoader(str(tmp_path))
+        tree = loader.explain(Environment(), "x.html")
+        assert tree.status == EXPLAIN_HIT
+        assert tree.children[0].status == EXPLAIN_HIT
+        tree = loader.explain(Environment(), "missing.html")
+        assert tree.status == EXPLAIN_MISS
+        assert tree.children[0].status == EXPLAIN_MISS
+
+    def test_render_shows_name_changes_and_shadowing(self):
+        loader = ChoiceLoader(
+            [
+                PrefixLoader({"a": DictLoader({"x.html": "A"})}),
+                DictLoader({"x.html": "B"}),
+            ]
+        )
+        rendered = loader.explain(Environment(), "a/x.html").render()
+        assert "a/x.html" in rendered
+        assert "x.html" in rendered
+        assert "shadowed" in rendered
+        assert "hit" in rendered
+
+    def test_explain_loader_function(self):
+        loader = DictLoader({"x.html": "A"})
+        tree = explain_loader(loader, Environment(), "x.html")
+        assert tree.status == EXPLAIN_HIT
+        tree = explain_loader(loader, Environment(), "missing.html")
+        assert tree.status == EXPLAIN_MISS

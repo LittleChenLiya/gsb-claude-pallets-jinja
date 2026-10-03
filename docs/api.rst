@@ -456,6 +456,64 @@ Here a list of the builtin loaders Jinja provides:
 
 .. autoclass:: jinja2.ModuleLoader
 
+If you want to know which sources a loader combination would try for a
+template name, without rendering the template, use the explain API.  It
+returns a :class:`LoaderTry` tree that preserves the order in which
+loaders are tried, marks loaders that are shadowed by an earlier hit, and
+records the final hit.  Composite loaders are recursed into, and the name
+stored on each node is the name that loader was actually asked to look up
+(so prefix stripping is visible in the tree).
+
+.. code-block:: python
+
+    >>> from jinja2 import ChoiceLoader, DictLoader, Environment
+    >>> from jinja2 import explain_loader
+    >>> loader = ChoiceLoader([
+    ...     DictLoader({"x.html": "A"}),
+    ...     DictLoader({"x.html": "B"}),
+    ... ])
+    >>> tree = explain_loader(loader, Environment(), "x.html")
+    >>> print(tree.render())
+    ChoiceLoader('x.html') -> hit
+      DictLoader('x.html') -> hit  [found in mapping]
+      DictLoader('x.html') -> shadowed  [shadowed by an earlier hit]
+
+Custom loaders are never inspected by calling their ``get_source`` method
+(which may have side effects).  Without an adapter they are recorded as
+``unsupported``.  Register a :class:`LoaderExplainAdapter` for a custom
+loader to teach the explain API how to inspect it.
+
+.. autofunction:: jinja2.explain_loader
+
+.. autoclass:: jinja2.LoaderTry
+    :members:
+
+.. autoclass:: jinja2.LoaderExplainAdapter
+    :members:
+
+The possible :attr:`LoaderTry.status` values are:
+
+.. data:: jinja2.EXPLAIN_HIT
+
+    The loader would find the template.
+
+.. data:: jinja2.EXPLAIN_MISS
+
+    The loader would not find the template.
+
+.. data:: jinja2.EXPLAIN_SHADOWED
+
+    The loader was not tried because an earlier loader already hit.
+
+.. data:: jinja2.EXPLAIN_UNSUPPORTED
+
+    The loader cannot be inspected because no explain adapter is
+    registered for it.
+
+.. data:: jinja2.EXPLAIN_ERROR
+
+    The explain adapter for the loader raised an exception.
+
 
 .. _bytecode-cache:
 
