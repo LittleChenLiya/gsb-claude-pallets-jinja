@@ -8,6 +8,7 @@ import typing as t
 import weakref
 from collections import ChainMap
 from contextlib import aclosing
+from dataclasses import dataclass
 from functools import lru_cache
 from functools import partial
 from functools import reduce
@@ -34,6 +35,7 @@ from .defaults import NEWLINE_SEQUENCE
 from .defaults import TRIM_BLOCKS
 from .defaults import VARIABLE_END_STRING
 from .defaults import VARIABLE_START_STRING
+from .exceptions import TemplateBatchError
 from .exceptions import TemplateNotFound
 from .exceptions import TemplateRuntimeError
 from .exceptions import TemplatesNotFound
@@ -1128,6 +1130,248 @@ class Environment:
             d = {}
 
         return ChainMap(d, self.globals)
+
+    #: Attributes that influence the source or bytecode produced by
+    #: :meth:`compile`. Their values are captured when a batch is
+    #: prepared and compared again when it is committed.
+    _compile_config_attrs = (
+        "block_start_string",
+        "block_end_string",
+        "variable_start_string",
+        "variable_end_string",
+        "comment_start_string",
+        "comment_end_string",
+        "line_statement_prefix",
+        "line_comment_prefix",
+        "trim_blocks",
+        "lstrip_blocks",
+        "newline_sequence",
+        "keep_trailing_newline",
+        "optimized",
+        "autoescape",
+        "is_async",
+        "sandboxed",
+        "finalize",
+        "undefined",
+        "code_generator_class",
+    )
+
+    def _compile_config_fingerprint(self) -> tuple[t.Any, ...]:
+        """Return a snapshot of the compile configuration that affects
+        the code generated for a template.
+        """
+        return (
+            *(getattr(self, name) for name in self._compile_config_attrs),
+            tuple(sorted(self.extensions)),
+        )
+
+    def prepare_template_batch(self, names: t.Iterable[str]) -> "PreparedTemplateBatch":
+        """Compile a batch of templates into a private staging area.
+
+        Only the explicitly given template names are compiled; template
+        dependencies such as ``{% extends %}`` or ``{% include %}`` are
+        not followed. Every name must load successfully from
+        :attr:`loader` and compile without errors, otherwise the
+        exception (usually :exc:`TemplateNotFound` or
+        :exc:`TemplateSyntaxError`) propagates and nothing is staged.
+
+        Compilation uses the current environment configuration but does
+        not touch :attr:`cache` or :attr:`bytecode_cache`, and templates
+        are not executed, so global functions and render expressions in
+        the templates are not called.
+
+        The returned :class:`PreparedTemplateBatch` can be checked with
+        :meth:`~PreparedTemplateBatch.is_stale` and published with
+        :meth:`~PreparedTemplateBatch.commit`. If the loader reports a
+        changed source (or its ``uptodate`` check fails) or the
+        environment compile configuration changed in the meantime, the
+        commit raises :exc:`TemplateBatchError` for the whole batch and
+        leaves every existing cache entry untouched.
+
+        .. versionadded:: 3.2
+        """
+        if self.loader is None:
+            raise TypeError("no loader for this environment specified")
+
+        unique_names: list[str] = []
+        seen: set[str] = set()
+
+        for name in names:
+            if not isinstance(name, str):
+                raise TypeError(
+                    f"template names must be strings, got {type(name).__name__}"
+                )
+
+            if name not in seen:
+                seen.add(name)
+                unique_names.append(name)
+
+        config_fingerprint = self._compile_config_fingerprint()
+        entries: list[PreparedTemplateEntry] = []
+
+        # Compile every template first. A syntax error propagates out of
+        # the loop before any entry exists, so no half batch is staged.
+        for name in unique_names:
+            source, filename, uptodate = self.loader.get_source(self, name)
+            # Only compile; `Template.from_code` is not called, so the
+            # generated code is never executed.
+            code = self.compile(source, name, filename)
+            entries.append(
+                PreparedTemplateEntry(
+                    name=name,
+                    source=source,
+                    filename=filename,
+                    uptodate=uptodate,
+                    code=code,
+                    config_fingerprint=config_fingerprint,
+                )
+            )
+
+        return PreparedTemplateBatch(
+            environment=self,
+            loader=self.loader,
+            entries=entries,
+            config_fingerprint=config_fingerprint,
+        )
+
+
+@dataclass
+class PreparedTemplateEntry:
+    """One compiled template held by a :class:`PreparedTemplateBatch`."""
+
+    name: str
+    source: str
+    filename: str | None
+    uptodate: t.Callable[[], bool] | None
+    code: CodeType
+    config_fingerprint: tuple[t.Any, ...]
+
+
+class PreparedTemplateBatch:
+    """The result of :meth:`Environment.prepare_template_batch`.
+
+    It holds compiled templates in a private staging area until
+    :meth:`commit` is called. None of the staged templates are visible
+    through :meth:`Environment.get_template` until then.
+
+    .. versionadded:: 3.2
+    """
+
+    def __init__(
+        self,
+        environment: "Environment",
+        loader: "BaseLoader",
+        entries: t.Sequence[PreparedTemplateEntry],
+        config_fingerprint: tuple[t.Any, ...],
+    ) -> None:
+        self._environment = environment
+        self._loader = loader
+        self._entries = list(entries)
+        self._config_fingerprint = config_fingerprint
+        self._committed = False
+
+    @property
+    def names(self) -> list[str]:
+        """The template names included in the batch, in order."""
+        return [entry.name for entry in self._entries]
+
+    def _check_entry(self, entry: PreparedTemplateEntry) -> tuple[bool, bool]:
+        """Validate one entry. Returns ``(stale, invalid)``."""
+        try:
+            source, _filename, uptodate = self._loader.get_source(
+                self._environment, entry.name
+            )
+        except TemplateNotFound:
+            return False, True
+
+        if source != entry.source:
+            return True, False
+
+        if entry.uptodate is not None and not entry.uptodate():
+            return True, False
+
+        if uptodate is not None:
+            entry.uptodate = uptodate
+
+        if entry.config_fingerprint != self._environment._compile_config_fingerprint():
+            return True, False
+
+        return False, False
+
+    def stale_names(self) -> list[str]:
+        """Names whose loader source or compile configuration changed
+        after the batch was prepared.
+        """
+        return [entry.name for entry in self._entries if self._check_entry(entry)[0]]
+
+    def is_stale(self) -> bool:
+        """Whether committing now would reject the batch.
+
+        This is `True` if at least one template's source or the
+        environment's compile configuration changed since preparation.
+        """
+        return any(self._check_entry(entry)[0] for entry in self._entries)
+
+    def commit(self) -> list[str]:
+        """Publish the whole batch to the environment caches.
+
+        All entries are revalidated first. If the loader reports a
+        different source, an ``uptodate`` check fails, the template can
+        no longer be found, or the compile configuration changed, the
+        entire batch is rejected with :exc:`TemplateBatchError` and no
+        cache (in-memory or bytecode) is modified.
+
+        On success the compiled templates are instantiated and placed in
+        the environment cache (and bytecode cache when configured), in
+        the same way as a regular load. The templates are instantiated
+        but not rendered, so render expressions and global functions in
+        the templates are still not called. The list of committed
+        template names is returned.
+        """
+        stale: list[str] = []
+        invalid: list[str] = []
+
+        for entry in self._entries:
+            is_stale, is_invalid = self._check_entry(entry)
+
+            if is_stale:
+                stale.append(entry.name)
+            elif is_invalid:
+                invalid.append(entry.name)
+
+        if stale or invalid:
+            raise TemplateBatchError(stale=stale, invalid=invalid)
+
+        env = self._environment
+        bcc = env.bytecode_cache
+        templates: list[tuple[t.Any, Template, PreparedTemplateEntry]] = []
+
+        # Build all template objects before publishing anything. The
+        # generated module code only defines render functions; it does
+        # not execute the template body, so globals are not called here.
+        for entry in self._entries:
+            cache_key = (weakref.ref(self._loader), entry.name)
+            template = env.template_class.from_code(
+                env,
+                entry.code,
+                env.make_globals(None),
+                entry.uptodate,
+            )
+            templates.append((cache_key, template, entry))
+
+        for cache_key, template, entry in templates:
+            if bcc is not None:
+                bucket = bcc.get_bucket(env, entry.name, entry.filename, entry.source)
+
+                if bucket.code is None:
+                    bucket.code = entry.code
+                    bcc.set_bucket(bucket)
+
+            if env.cache is not None:
+                env.cache[cache_key] = template
+
+        self._committed = True
+        return [entry.name for entry in self._entries]
 
 
 class Template:

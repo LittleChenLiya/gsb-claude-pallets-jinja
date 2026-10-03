@@ -164,3 +164,47 @@ class FilterArgumentError(TemplateRuntimeError):
     """This error is raised if a filter was called with inappropriate
     arguments
     """
+
+
+class TemplateBatchError(TemplateError):
+    """Raised when a prepared batch of templates cannot be committed
+    because at least one template is no longer valid.
+
+    This happens when the source reported by the loader, or the compile
+    configuration of the environment, changed between
+    :meth:`Environment.prepare_template_batch` and
+    :meth:`~jinja2.environment.PreparedTemplateBatch.commit`. Nothing is
+    published when this is raised; caches keep their previous state.
+
+    .. versionadded:: 3.2
+    """
+
+    def __init__(
+        self,
+        message: str | None = None,
+        stale: t.Sequence[str] = (),
+        invalid: t.Sequence[str] = (),
+    ) -> None:
+        if message is None:
+            parts = []
+
+            if stale:
+                parts.append("changed: " + ", ".join(repr(name) for name in stale))
+
+            if invalid:
+                parts.append(
+                    "no longer available: " + ", ".join(repr(name) for name in invalid)
+                )
+
+            if parts:
+                message = "template batch was rejected (" + "; ".join(parts) + ")"
+            else:
+                message = "template batch was rejected"
+
+        super().__init__(message)
+        #: Names whose source or compile configuration changed after
+        #: the batch was prepared.
+        self.stale = list(stale)
+        #: Names that fail validation again, for example because the
+        #: loader can no longer locate them.
+        self.invalid = list(invalid)

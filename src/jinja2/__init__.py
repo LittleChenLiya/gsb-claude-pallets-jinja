@@ -11,8 +11,10 @@ from .bccache import BytecodeCache as BytecodeCache
 from .bccache import FileSystemBytecodeCache as FileSystemBytecodeCache
 from .bccache import MemcachedBytecodeCache as MemcachedBytecodeCache
 from .environment import Environment as Environment
+from .environment import PreparedTemplateBatch as PreparedTemplateBatch
 from .environment import Template as Template
 from .exceptions import TemplateAssertionError as TemplateAssertionError
+from .exceptions import TemplateBatchError as TemplateBatchError
 from .exceptions import TemplateError as TemplateError
 from .exceptions import TemplateNotFound as TemplateNotFound
 from .exceptions import TemplateRuntimeError as TemplateRuntimeError

@@ -82,7 +82,8 @@ useful if you want to dig deeper into Jinja or :ref:`develop extensions
 .. autoclass:: Environment([options])
     :members: from_string, get_template, select_template,
               get_or_select_template, join_path, extend, compile_expression,
-              compile_templates, list_templates, add_extension
+              compile_templates, list_templates, add_extension,
+              prepare_template_batch
 
     .. attribute:: shared
 
@@ -497,6 +498,51 @@ Builtin bytecode caches:
 .. autoclass:: jinja2.FileSystemBytecodeCache
 
 .. autoclass:: jinja2.MemcachedBytecodeCache
+
+
+.. _batch-caching:
+
+Preparing a Batch of Templates
+------------------------------
+
+.. versionadded:: 3.2
+
+To warm up the caches without risking a half-populated batch when one
+template has a syntax error, the environment can prepare a batch first
+and publish it in a single atomic commit.
+
+:meth:`~Environment.prepare_template_batch` accepts the explicit
+template names to compile — dependencies such as ``{% include %}`` and
+``{% extends %}`` are *not* followed. Every named template is fetched
+from the loader and compiled with the current environment configuration
+into a private staging area. If any template is missing or does not
+compile, the exception propagates and nothing is staged or cached.
+
+Preparation only compiles; it does not instantiate or render
+templates, so global functions and render expressions in the templates
+are not executed.
+
+The returned object is committed later:
+
+.. autoclass:: jinja2.PreparedTemplateBatch
+    :members: names, is_stale, stale_names, commit
+
+At commit time, the loader is consulted again. If a template's source
+changed, its ``uptodate`` callback returns `False`, it can no longer be
+found, or the environment compile configuration changed, the *entire*
+batch is rejected — no template is written to the in-memory cache or the
+:ref:`bytecode cache <bytecode-cache>`, and entries already cached stay
+in place. The rejection raises:
+
+.. autoclass:: jinja2.TemplateBatchError
+    :members: stale, invalid
+
+A runnable example that prints the cache states after every step,
+including a counting global proving it is never called during
+preparation or commit:
+
+.. literalinclude:: examples/prepare_template_batch.py
+    :language: python3
 
 
 Async Support
