@@ -12,6 +12,7 @@ from .bccache import FileSystemBytecodeCache as FileSystemBytecodeCache
 from .bccache import MemcachedBytecodeCache as MemcachedBytecodeCache
 from .environment import Environment as Environment
 from .environment import Template as Template
+from .exceptions import LoopBudgetExhausted as LoopBudgetExhausted
 from .exceptions import TemplateAssertionError as TemplateAssertionError
 from .exceptions import TemplateError as TemplateError
 from .exceptions import TemplateNotFound as TemplateNotFound

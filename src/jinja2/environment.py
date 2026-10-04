@@ -45,6 +45,7 @@ from .lexer import TokenStream
 from .nodes import EvalContext
 from .parser import Parser
 from .runtime import Context
+from .runtime import attach_loop_budget
 from .runtime import new_context
 from .runtime import Undefined
 from .utils import _PassArg
@@ -1379,9 +1380,17 @@ class Template:
 
         `locals` can be a dict of local variables for internal usage.
         """
-        return new_context(
+        ctx = new_context(
             self.environment, self.name, self.blocks, vars, shared, self.globals, locals
         )
+
+        if not shared:
+            # A top level render starts with a fresh loop budget.  Shared
+            # contexts (includes, imports with context, derived contexts)
+            # inherit the tracker through their parent vars instead.
+            attach_loop_budget(ctx)
+
+        return ctx
 
     def make_module(
         self,

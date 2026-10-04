@@ -592,6 +592,39 @@ class LoopControlExtension(Extension):
         return nodes.Continue(lineno=token.lineno)
 
 
+class LoopBudgetExtension(Extension):
+    """Adds a per-render budget that limits how many items ``for`` loops
+    may consume in total while a template is rendered.
+
+    After adding the extension, set the ``loop_budget`` attribute on the
+    environment to the maximum number of items all loops in one render
+    may consume::
+
+        env = Environment(extensions=["jinja2.ext.LoopBudgetExtension"])
+        env.loop_budget = 1000
+
+    Nested loops share the same budget, and loops inside macros and
+    templates included with context count towards the budget of the
+    render that triggered them.  The budget is checked before a loop
+    receives its next item; reaching the natural end of an iterable is
+    never counted.  When the budget is exhausted,
+    :class:`jinja2.LoopBudgetExhausted` is raised, pointing at the
+    template and line of the loop.  Once rendering has finished or
+    failed, the budget is discarded and the next render starts with a
+    fresh budget.
+
+    Setting ``loop_budget`` to ``None`` (the default) disables the
+    limit.  Environments that don't load this extension compile and run
+    loops exactly as before.
+
+    .. versionadded:: 3.2
+    """
+
+    def __init__(self, environment: Environment) -> None:
+        super().__init__(environment)
+        environment.extend(loop_budget=None)
+
+
 class DebugExtension(Extension):
     """A ``{% debug %}`` tag that dumps the available variables,
     filters, and tests.
@@ -841,4 +874,5 @@ def babel_extract(
 i18n = InternationalizationExtension
 do = ExprStmtExtension
 loopcontrols = LoopControlExtension
+loopbudget = LoopBudgetExtension
 debug = DebugExtension

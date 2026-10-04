@@ -1253,18 +1253,30 @@ class CodeGenerator(NodeVisitor):
         else:
             self.write(" in ")
 
+        # If the loop budget extension is enabled, wrap the iterable so
+        # that every item the loop takes is counted against the render's
+        # budget.  The wrapper handles the async conversion itself.
+        loop_budget = "jinja2.ext.LoopBudgetExtension" in self.environment.extensions
+        if loop_budget:
+            self.write(
+                f"{self.choose_async('aloop_budget_iter', 'loop_budget_iter')}(context, "
+            )
+
         if node.test:
             self.write(f"{loop_filter_func}(")
         if node.recursive:
             self.write("reciter")
         else:
-            if self.environment.is_async and not extended_loop:
+            if self.environment.is_async and not extended_loop and not loop_budget:
                 self.write("auto_aiter(")
             self.visit(node.iter, frame)
-            if self.environment.is_async and not extended_loop:
+            if self.environment.is_async and not extended_loop and not loop_budget:
                 self.write(")")
         if node.test:
             self.write(")")
+
+        if loop_budget:
+            self.write(f", {node.lineno})")
 
         if node.recursive:
             self.write(", undefined, loop_render_func, depth):")

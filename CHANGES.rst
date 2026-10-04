@@ -13,6 +13,11 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Add ``jinja2.ext.LoopBudgetExtension`` and the
+    ``jinja2.LoopBudgetExhausted`` exception. Setting
+    ``environment.loop_budget`` limits the total number of items all
+    ``for`` loops may consume during a single render, including loops in
+    nested loops, macros, and templates included with context.
 
 
 Version 3.1.6

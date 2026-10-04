@@ -12,6 +12,7 @@ from markupsafe import soft_str
 
 from .async_utils import auto_aiter
 from .async_utils import auto_await  # noqa: F401
+from .exceptions import LoopBudgetExhausted
 from .exceptions import TemplateNotFound  # noqa: F401
 from .exceptions import TemplateRuntimeError  # noqa: F401
 from .exceptions import UndefinedError
@@ -59,11 +60,13 @@ exported = [
     "Namespace",
     "Undefined",
     "internalcode",
+    "loop_budget_iter",
 ]
 async_exported = [
     "AsyncLoopContext",
     "auto_aiter",
     "auto_await",
+    "aloop_budget_iter",
 ]
 
 
@@ -88,6 +91,133 @@ def markup_join(seq: t.Iterable[t.Any]) -> str:
 def str_join(seq: t.Iterable[t.Any]) -> str:
     """Simple args to string conversion and concatenation."""
     return concat(map(str, seq))
+
+
+#: Name of the context variable that holds the loop budget tracker for the
+#: current render.  This is an internal implementation detail, templates
+#: must not rely on it.
+_loop_budget_context_key = "_jinja_loop_budget"
+
+
+class _LoopBudget:
+    """Tracks how many items ``for`` loops may still consume during a
+    single render.  One instance is created per top level render and is
+    shared by nested loops, macros, and templates included with context.
+    """
+
+    __slots__ = ("limit", "remaining")
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.remaining = limit
+
+
+def attach_loop_budget(context: "Context") -> None:
+    """Give ``context`` a fresh loop budget tracker if the environment
+    configures a loop budget.  This is called for every new top level
+    context, so each render starts with a new budget and no budget state
+    is kept once the render has finished or failed.  Shared contexts
+    (includes and imports with context, derived contexts) instead inherit
+    the tracker through their parent vars.
+    """
+    limit = getattr(context.environment, "loop_budget", None)
+
+    if limit is not None:
+        context.vars[_loop_budget_context_key] = _LoopBudget(limit)
+
+
+def _get_loop_budget(context: "Context") -> t.Optional[_LoopBudget]:
+    """Return the loop budget tracker for the render ``context`` belongs
+    to, or ``None`` if no budget is active.
+    """
+    budget = context.get(_loop_budget_context_key)
+
+    if isinstance(budget, _LoopBudget):
+        return budget
+
+    return None
+
+
+class _LoopBudgetIterator:
+    """Iterator wrapper that counts the items delivered to a ``for`` loop
+    against the render's loop budget.  The budget is checked every time
+    the loop asks for the next item, before that item is handed to the
+    loop body.  Reaching the natural end of the wrapped iterator
+    (``StopIteration``) is never counted, so at most one item beyond the
+    limit is pulled from the wrapped iterator, and that item is never
+    delivered to the template.
+    """
+
+    __slots__ = ("_iterator", "_budget", "_name", "_lineno")
+
+    def __init__(
+        self,
+        budget: _LoopBudget,
+        iterable: t.Iterable[V],
+        name: t.Optional[str],
+        lineno: int,
+    ) -> None:
+        self._iterator = iter(iterable)
+        self._budget = budget
+        self._name = name
+        self._lineno = lineno
+
+    def __iter__(self) -> "_LoopBudgetIterator":
+        return self
+
+    @internalcode
+    def __next__(self) -> V:
+        # StopIteration from the wrapped iterator ends the loop normally
+        # and is not counted against the budget.
+        item = next(self._iterator)
+        budget = self._budget
+
+        if budget.remaining <= 0:
+            raise LoopBudgetExhausted(budget.limit, self._name, self._lineno)
+
+        budget.remaining -= 1
+        return item
+
+
+@internalcode
+def loop_budget_iter(
+    context: "Context", iterable: t.Iterable[V], lineno: int
+) -> t.Iterable[V]:
+    """Wrap ``iterable`` so that the items a ``for`` loop takes from it are
+    counted against the render's loop budget.  This is called from
+    generated code when :class:`jinja2.ext.LoopBudgetExtension` is
+    enabled.  Returns ``iterable`` unchanged if no budget is active for
+    the current render.
+    """
+    budget = _get_loop_budget(context)
+
+    if budget is None:
+        return iterable
+
+    return _LoopBudgetIterator(budget, iterable, context.name, lineno)
+
+
+@internalcode
+async def aloop_budget_iter(
+    context: "Context",
+    iterable: t.Iterable[V] | t.AsyncIterable[V],
+    lineno: int,
+) -> t.AsyncGenerator[V, None]:
+    """Async version of :func:`loop_budget_iter`."""
+    budget = _get_loop_budget(context)
+
+    if budget is None:
+        async for item in auto_aiter(iterable):
+            yield item
+
+        return
+
+    async for item in auto_aiter(iterable):
+        if budget.remaining <= 0:
+            raise LoopBudgetExhausted(budget.limit, context.name, lineno)
+
+        budget.remaining -= 1
+        yield item
 
 
 def new_context(

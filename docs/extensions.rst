@@ -222,6 +222,57 @@ This extension adds support for ``break`` and ``continue`` in loops.  After
 enabling, Jinja provides those two keywords which work exactly like in
 Python.
 
+.. _loop-budget-extension:
+
+Loop Budget
+-----------
+
+**Import name:** ``jinja2.ext.LoopBudgetExtension``
+
+.. versionadded:: 3.2
+
+This extension adds a per-render budget that limits how many items ``for``
+loops may consume in total while a template is rendered.  This is useful
+to stop templates from iterating unbounded generators or unexpectedly
+large data sets.
+
+.. code-block:: python
+
+    from jinja2 import Environment
+
+    env = Environment(extensions=["jinja2.ext.LoopBudgetExtension"])
+    env.loop_budget = 1000
+
+The budget counts every item that any ``for`` loop takes from its
+iterable during one render:
+
+-   Nested loops share the same budget.  For example, an outer loop that
+    runs 2 times with an inner loop that runs 3 times per iteration
+    consumes 8 items in total, so it needs a budget of at least 8.
+
+-   Loops inside macros, and inside templates that are included *with*
+    context (the default for ``{% include %}``), count towards the
+    budget of the render that triggered them.  Templates included or
+    imported *without* context render in isolation and do not share the
+    budget.
+
+-   The budget is checked before a loop receives its next item; the
+    iterable is never converted to a list first.  Reaching the natural
+    end of an iterable is never counted, and at most one item beyond the
+    limit is pulled from an underlying iterator, so a generator with
+    side effects is never over-consumed.
+
+-   When the budget is exhausted, :class:`jinja2.LoopBudgetExhausted`
+    is raised.  Its message contains the name of the template and the
+    line number of the loop that ran out of budget.
+
+-   Once rendering has finished or failed, the budget state is
+    discarded.  The next call to ``render`` starts with a fresh budget.
+
+Setting ``env.loop_budget`` to ``None`` (the default) disables the
+limit while keeping the extension loaded.  Environments that don't load
+the extension are not affected and compile loops exactly as before.
+
 .. _with-extension:
 
 With Statement

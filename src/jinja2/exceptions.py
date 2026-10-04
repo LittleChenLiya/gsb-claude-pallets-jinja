@@ -164,3 +164,24 @@ class FilterArgumentError(TemplateRuntimeError):
     """This error is raised if a filter was called with inappropriate
     arguments
     """
+
+
+class LoopBudgetExhausted(TemplateRuntimeError):
+    """Raised when a ``for`` loop tries to consume more items than the
+    render's loop budget allows.  The budget is configured with
+    :class:`jinja2.ext.LoopBudgetExtension`.  The error message contains
+    the name of the template and the line number of the loop that
+    exhausted the budget.
+
+    .. versionadded:: 3.2
+    """
+
+    def __init__(self, limit: int, name: str | None, lineno: int) -> None:
+        self.limit = limit
+        self.name = name
+        self.lineno = lineno
+        super().__init__(
+            f"loop budget of {limit} item(s) per render is exhausted: the"
+            f" for loop in template {name if name is not None else '<unknown>'!r},"
+            f" line {lineno}, tried to consume another item"
+        )
