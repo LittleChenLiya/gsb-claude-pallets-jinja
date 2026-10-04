@@ -60,9 +60,12 @@ API
 .. autoclass:: SandboxedEnvironment([options])
     :members: is_safe_attribute, is_safe_callable, default_binop_table,
               default_unop_table, intercepted_binops, intercepted_unops,
-              call_binop, call_unop
+              call_binop, call_unop, authorized_proxy
 
 .. autoclass:: ImmutableSandboxedEnvironment([options])
+
+.. autoclass:: AuthorizedMethodProxy(environment, obj, allowed)
+    :members: _allow, _revoke
 
 .. autoexception:: SecurityError
 
@@ -71,6 +74,46 @@ API
 .. autofunction:: is_internal_attribute
 
 .. autofunction:: modifies_known_mutable
+
+
+Authorizing Specific Methods
+----------------------------
+
+Sometimes a template should be able to call a few methods of an object
+without exposing everything else on it. Wrap the object with
+:meth:`SandboxedEnvironment.authorized_proxy` (or
+:class:`AuthorizedMethodProxy` directly) and pass the allowed method
+names. Everything else, including private attributes and methods marked
+:func:`unsafe`, stays rejected with a diagnosable
+:exc:`~jinja2.exceptions.SecurityError`, and the wrapped object is never
+modified. Objects that are not wrapped keep the regular sandbox
+behavior.
+
+.. code-block:: pycon
+
+    >>> from jinja2.sandbox import SandboxedEnvironment
+    >>> class ReportService:
+    ...     def read(self):
+    ...         return "report data"
+    ...     def write(self):
+    ...         return "MUTATED"
+    >>> env = SandboxedEnvironment()
+    >>> proxy = env.authorized_proxy(ReportService(), allowed={"read"})
+    >>> env.from_string("{{ service.read() }}").render(service=proxy)
+    'report data'
+    >>> env.from_string("{{ service.write() }}").render(service=proxy)
+    Traceback (most recent call last):
+      ...
+    jinja2.exceptions.SecurityError: access to attribute 'write' of 'ReportService' object is not authorized, allowed methods are ['read']
+
+The allowed set is checked again before every call, together with the
+environment's regular :meth:`~SandboxedEnvironment.is_safe_attribute`
+and :meth:`~SandboxedEnvironment.is_safe_callable` rules. Updating the
+set with :meth:`~AuthorizedMethodProxy._allow` and
+:meth:`~AuthorizedMethodProxy._revoke` (or mutating a ``set`` passed as
+*allowed*) takes effect immediately, even for method proxies that were
+retrieved from the proxy earlier. This behaves the same in sync and
+async (``enable_async=True``) rendering.
 
 
 Operator Intercepting

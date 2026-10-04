@@ -1,3 +1,5 @@
+import types
+
 import pytest
 from markupsafe import escape
 
@@ -200,3 +202,173 @@ class TestStringFormatMap:
 
         with pytest.raises(SecurityError):
             t.render()
+
+
+class ProxyService:
+    """An object with a mix of read, write, private, and unsafe methods,
+    used to exercise AuthorizedMethodProxy.
+    """
+
+    def __init__(self):
+        self.writes = 0
+
+    def read(self):
+        return "data"
+
+    def write(self):
+        self.writes += 1
+        return "written"
+
+    def _secret(self):
+        return "secret"
+
+    @unsafe
+    def reset(self):
+        return "reset"
+
+
+class AsyncProxyService:
+    async def read(self):
+        return "data"
+
+    async def write(self):
+        return "written"
+
+    async def _secret(self):
+        return "secret"
+
+    @unsafe
+    async def reset(self):
+        return "reset"
+
+
+# The same small templates are rendered through the sync and async paths.
+PROXY_READ_TEMPLATE = "{{ service.read() }}"
+PROXY_WRITE_TEMPLATE = "{{ service.write() }}"
+PROXY_PRIVATE_TEMPLATE = "{{ service._secret() }}"
+PROXY_UNSAFE_TEMPLATE = "{{ service.reset() }}"
+
+
+class TestAuthorizedMethodProxy:
+    def test_allowed_method_call(self):
+        env = SandboxedEnvironment()
+        proxy = env.authorized_proxy(ProxyService(), allowed={"read"})
+        assert env.from_string(PROXY_READ_TEMPLATE).render(service=proxy) == "data"
+        # item access goes through the same authorization
+        assert (
+            env.from_string("{{ service['read']() }}").render(service=proxy) == "data"
+        )
+
+    def test_unauthorized_method_rejected(self):
+        env = SandboxedEnvironment()
+        service = ProxyService()
+        proxy = env.authorized_proxy(service, allowed={"read"})
+
+        with pytest.raises(SecurityError):
+            env.from_string(PROXY_WRITE_TEMPLATE).render(service=proxy)
+
+        # the wrapped object is never called or modified
+        assert service.writes == 0
+
+    def test_private_attribute_rejected(self):
+        env = SandboxedEnvironment()
+        # even explicitly allowing a private name cannot bypass the
+        # environment's regular is_safe_attribute check
+        proxy = env.authorized_proxy(ProxyService(), allowed={"read", "_secret"})
+
+        with pytest.raises(SecurityError):
+            env.from_string(PROXY_PRIVATE_TEMPLATE).render(service=proxy)
+
+    def test_unsafe_callable_marker_still_applies(self):
+        env = SandboxedEnvironment()
+        proxy = env.authorized_proxy(ProxyService(), allowed={"read", "reset"})
+
+        with pytest.raises(SecurityError):
+            env.from_string(PROXY_UNSAFE_TEMPLATE).render(service=proxy)
+
+    def test_attribute_read_does_not_expose_raw_method(self):
+        env = SandboxedEnvironment()
+        service = ProxyService()
+        proxy = env.authorized_proxy(service, allowed={"read"})
+        value = env.getattr(proxy, "read")
+        # an authorized read returns a re-checking proxy, not the raw
+        # bound method of the wrapped object
+        assert not isinstance(value, types.MethodType)
+        assert value() == "data"
+        # an unauthorized read is rejected instead of exposing the method
+        pytest.raises(SecurityError, env.getattr, proxy, "write")
+        pytest.raises(SecurityError, env.getattr, proxy, "_secret")
+
+    def test_revocation_applies_to_retrieved_method(self):
+        env = SandboxedEnvironment()
+        proxy = env.authorized_proxy(ProxyService(), allowed={"read"})
+        # the template takes the read proxy first, then the permission is
+        # revoked, and the already retrieved proxy must obey the new rules
+        t = env.from_string("{% set r = service.read %}{{ revoke() }}{{ r() }}")
+
+        with pytest.raises(SecurityError):
+            t.render(service=proxy, revoke=lambda: proxy._revoke("read"))
+
+    def test_revoke_and_reallow(self):
+        env = SandboxedEnvironment()
+        proxy = env.authorized_proxy(ProxyService(), allowed={"read"})
+        t = env.from_string(PROXY_READ_TEMPLATE)
+        assert t.render(service=proxy) == "data"
+        proxy._revoke("read")
+
+        with pytest.raises(SecurityError):
+            t.render(service=proxy)
+
+        proxy._allow("read")
+        assert t.render(service=proxy) == "data"
+
+    def test_caller_provided_set_is_live(self):
+        env = SandboxedEnvironment()
+        allowed = {"read"}
+        proxy = env.authorized_proxy(ProxyService(), allowed=allowed)
+        t = env.from_string(PROXY_READ_TEMPLATE)
+        assert t.render(service=proxy) == "data"
+        allowed.discard("read")
+
+        with pytest.raises(SecurityError):
+            t.render(service=proxy)
+
+    def test_plain_object_behavior_unchanged(self):
+        env = SandboxedEnvironment()
+        service = ProxyService()
+        # without a proxy the regular sandbox rules apply, write is a
+        # normal callable method
+        assert env.from_string(PROXY_WRITE_TEMPLATE).render(service=service) == (
+            "written"
+        )
+        assert service.writes == 1
+
+    def test_async(self, run_async_fn):
+        env = SandboxedEnvironment(enable_async=True)
+        proxy = env.authorized_proxy(AsyncProxyService(), allowed={"read"})
+
+        async def render(source):
+            return await env.from_string(source).render_async(service=proxy)
+
+        assert run_async_fn(render, PROXY_READ_TEMPLATE) == "data"
+
+        for source in (
+            PROXY_WRITE_TEMPLATE,
+            PROXY_PRIVATE_TEMPLATE,
+            PROXY_UNSAFE_TEMPLATE,
+        ):
+            with pytest.raises(SecurityError):
+                run_async_fn(render, source)
+
+    def test_async_revocation(self, run_async_fn):
+        env = SandboxedEnvironment(enable_async=True)
+        proxy = env.authorized_proxy(AsyncProxyService(), allowed={"read"})
+        t = env.from_string("{% set r = service.read %}{{ revoke() }}{{ r() }}")
+
+        async def render():
+            return await t.render_async(
+                service=proxy, revoke=lambda: proxy._revoke("read")
+            )
+
+        with pytest.raises(SecurityError):
+            run_async_fn(render)

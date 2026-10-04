@@ -13,6 +13,12 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Add ``sandbox.AuthorizedMethodProxy`` and
+    ``SandboxedEnvironment.authorized_proxy`` to expose only an
+    explicitly authorized set of an object's methods to sandboxed
+    templates. The live allowed set and the regular sandbox restrictions
+    are re-checked before every call, in both sync and async rendering,
+    and rejections raise ``SecurityError``.
 
 
 Version 3.1.6

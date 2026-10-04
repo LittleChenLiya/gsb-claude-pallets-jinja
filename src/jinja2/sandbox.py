@@ -174,6 +174,117 @@ def modifies_known_mutable(obj: t.Any, attr: str) -> bool:
     return False
 
 
+class AuthorizedMethodProxy:
+    """Wraps an object so that only an explicitly authorized set of its
+    methods is exposed to sandboxed templates.  All other attribute access
+    through the proxy is rejected with a :exc:`SecurityError`, so reading an
+    attribute never exposes an unauthorized raw bound method.  The wrapped
+    object itself is never modified.
+
+    Every call to an authorized method re-checks both the live allowed set
+    and the environment's regular sandbox restrictions
+    (:meth:`~SandboxedEnvironment.is_safe_attribute` and
+    :meth:`~SandboxedEnvironment.is_safe_callable`), so revoking a name or
+    marking a method :func:`unsafe` also blocks method proxies that were
+    retrieved earlier.  This works the same for sync and async rendering;
+    if the wrapped method is async, the returned coroutine is awaited by
+    the template runtime as usual.
+
+    The allowed set is live: if a :class:`set` is passed as *allowed* it is
+    kept by reference, and it can always be mutated through the
+    Python-side :meth:`_allow` and :meth:`_revoke` methods.  Changes take
+    effect immediately for the proxy and for methods already taken from it.
+
+    .. code-block:: python
+
+        proxy = env.authorized_proxy(service, allowed={"read"})
+        env.from_string("{{ service.read() }}").render(service=proxy)
+
+    The management methods are underscore-prefixed so that the sandbox's
+    default private-attribute rule prevents templates from changing the
+    authorization themselves.
+
+    .. versionadded:: 3.2
+    """
+
+    __slots__ = ("_environment", "_obj", "_allowed")
+
+    def __init__(
+        self,
+        environment: "SandboxedEnvironment",
+        obj: t.Any,
+        allowed: t.Iterable[str] = (),
+    ) -> None:
+        self._environment = environment
+        self._obj = obj
+        # Keep a caller-provided set by reference so that updates to it are
+        # honored by the proxy and by methods already taken from it.
+        self._allowed: set[str] = allowed if isinstance(allowed, set) else set(allowed)
+
+    def __repr__(self) -> str:
+        return (
+            f"<{type(self).__name__} of {self._obj!r},"
+            f" allowed={sorted(self._allowed)!r}>"
+        )
+
+    def _allow(self, *names: str) -> None:
+        """Add *names* to the live allowed set.  Python-side management
+        method, not reachable from sandboxed templates.
+        """
+        self._allowed.update(names)
+
+    def _revoke(self, *names: str) -> None:
+        """Remove *names* from the live allowed set.  Already retrieved
+        method proxies for those names are rejected on their next call.
+        """
+        self._allowed.difference_update(names)
+
+    def __getattr__(self, name: str) -> t.Callable[..., t.Any]:
+        if name.startswith("__") and name.endswith("__"):
+            # Keep Python protocol introspection (such as ``__html__``)
+            # behaving normally instead of failing with a SecurityError.
+            raise AttributeError(name)
+
+        if name not in self._allowed:
+            raise SecurityError(
+                f"access to attribute {name!r} of"
+                f" {type(self._obj).__name__!r} object is not authorized,"
+                f" allowed methods are {sorted(self._allowed)!r}"
+            )
+
+        return self._make_authorized_method(name)
+
+    def _make_authorized_method(self, name: str) -> t.Callable[..., t.Any]:
+        def authorized_method(*args: t.Any, **kwargs: t.Any) -> t.Any:
+            # Re-check the live allowed set on every call so that revoking
+            # a name also blocks method proxies retrieved earlier.
+            if name not in self._allowed:
+                raise SecurityError(
+                    f"access to method {name!r} of"
+                    f" {type(self._obj).__name__!r} object has been revoked"
+                )
+
+            target = getattr(self._obj, name)
+            env = self._environment
+
+            # Re-apply the environment's regular sandbox restrictions to
+            # the original object on every call.
+            if not env.is_safe_attribute(self._obj, name, target):
+                raise SecurityError(
+                    f"access to attribute {name!r} of"
+                    f" {type(self._obj).__name__!r} object is unsafe."
+                )
+
+            if not env.is_safe_callable(target):
+                raise SecurityError(f"{target!r} is not safely callable")
+
+            return target(*args, **kwargs)
+
+        authorized_method.__name__ = name
+        authorized_method.__qualname__ = f"AuthorizedMethodProxy.{name}"
+        return authorized_method
+
+
 class SandboxedEnvironment(Environment):
     """The sandboxed environment.  It works like the regular environment but
     tells the compiler to generate sandboxed code.  Additionally subclasses of
@@ -244,6 +355,23 @@ class SandboxedEnvironment(Environment):
         self.globals["range"] = safe_range
         self.binop_table = self.default_binop_table.copy()
         self.unop_table = self.default_unop_table.copy()
+
+    def authorized_proxy(
+        self, obj: t.Any, allowed: t.Iterable[str] = ()
+    ) -> AuthorizedMethodProxy:
+        """Wrap *obj* in an :class:`AuthorizedMethodProxy` so that only the
+        explicitly *allowed* method names are exposed to sandboxed
+        templates.  The original object is not modified, and objects that
+        are not wrapped keep the regular sandbox behavior.
+
+        .. code-block:: python
+
+            proxy = env.authorized_proxy(service, allowed={"read"})
+            env.from_string("{{ service.read() }}").render(service=proxy)
+
+        .. versionadded:: 3.2
+        """
+        return AuthorizedMethodProxy(self, obj, allowed)
 
     def is_safe_attribute(self, obj: t.Any, attr: str, value: t.Any) -> bool:
         """The sandboxed environment will call this method to check if the
