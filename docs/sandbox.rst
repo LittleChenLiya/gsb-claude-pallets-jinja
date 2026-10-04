@@ -52,14 +52,61 @@ prevent calling them from templates when passing objects as data. Use
 dictionaries.
 
 
+Authorizing Specific Methods
+----------------------------
+
+When an object has a few methods that are safe to call from a template
+but others that are not, :meth:`~SandboxedEnvironment.authorize` wraps
+the object in a proxy that only exposes the methods you list. The
+original object is not modified, and the sandbox's normal safety checks
+still apply.
+
+.. code-block:: python
+
+    >>> from jinja2.sandbox import SandboxedEnvironment
+    >>> env = SandboxedEnvironment()
+    >>> class Service:
+    ...     def read(self):
+    ...         return "read"
+    ...     def write(self):
+    ...         return "write"
+    >>> permissions = {"read"}
+    >>> service = env.authorize(Service(), permissions)
+    >>> env.from_string("{{ service.read() }}").render(service=service)
+    'read'
+    >>> env.from_string("{{ service.write() }}").render(service=service)
+    Traceback (most recent call last):
+      ...
+    SecurityError: access to attribute 'write' of 'Service' object is not
+        permitted; only ['read'] are authorized.
+
+The proxy re-checks the permissions on every call, so updating the
+allowed set takes effect immediately, even for methods that were
+extracted from the proxy before the update. Sync and async rendering
+behave identically.
+
+.. code-block:: python
+
+    >>> permissions.remove("read")
+    >>> env.from_string("{{ service.read() }}").render(service=service)
+    Traceback (most recent call last):
+      ...
+    SecurityError: call to method 'read' of 'Service' object is not
+        permitted; the authorization was revoked.
+
+See :meth:`~SandboxedEnvironment.authorize` for the full API. A runnable
+demo is available in the ``examples/authorized_proxy.py`` file.
+
+
 API
 ---
 
 .. module:: jinja2.sandbox
 
 .. autoclass:: SandboxedEnvironment([options])
-    :members: is_safe_attribute, is_safe_callable, default_binop_table,
-              default_unop_table, intercepted_binops, intercepted_unops,
+    :members: authorize, is_safe_attribute, is_safe_callable,
+              default_binop_table, default_unop_table,
+              intercepted_binops, intercepted_unops,
               call_binop, call_unop
 
 .. autoclass:: ImmutableSandboxedEnvironment([options])

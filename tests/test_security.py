@@ -127,6 +127,109 @@ class TestSandbox:
                 t.render(ctx)
 
 
+class AuthorizedService:
+    def read(self):
+        return "read"
+
+    async def aread(self):
+        return "async read"
+
+    def write(self):
+        return "write"
+
+    def _secret(self):
+        return "secret"
+
+    @unsafe
+    def danger(self):
+        return "danger"
+
+
+class TestAuthorizedProxy:
+    def test_authorized_method_call(self):
+        env = SandboxedEnvironment()
+        service = env.authorize(AuthorizedService(), {"read"})
+        assert env.from_string("{{ service.read() }}").render(service=service) == "read"
+
+    def test_unauthorized_method_rejected(self):
+        env = SandboxedEnvironment()
+        service = env.authorize(AuthorizedService(), {"read"})
+        with pytest.raises(SecurityError, match="not permitted"):
+            env.from_string("{{ service.write() }}").render(service=service)
+
+    def test_revocation_after_extraction(self):
+        env = SandboxedEnvironment()
+        permissions = {"read"}
+        service = env.authorize(AuthorizedService(), permissions)
+        template = env.from_string("{% set m = service.read %}{{ m() }}")
+        assert template.render(service=service) == "read"
+        # Extract the method proxy before revoking.
+        method = service.read
+        assert method() == "read"
+        permissions.remove("read")
+        # The extracted proxy obeys the new rules on every call.
+        with pytest.raises(SecurityError, match="revoked"):
+            method()
+        # Re-rendering the template is also rejected.
+        with pytest.raises(SecurityError, match="not permitted"):
+            template.render(service=service)
+
+    def test_private_attribute_denied(self):
+        env = SandboxedEnvironment()
+        service = env.authorize(AuthorizedService(), {"read"})
+        with pytest.raises(SecurityError, match="not permitted"):
+            env.from_string("{{ service._secret() }}").render(service=service)
+
+    def test_unsafe_callable_denied(self):
+        env = SandboxedEnvironment()
+        service = env.authorize(AuthorizedService(), {"read", "danger"})
+        with pytest.raises(SecurityError, match="not safely callable"):
+            env.from_string("{{ service.danger() }}").render(service=service)
+
+    def test_original_object_not_modified(self):
+        env = SandboxedEnvironment()
+        original = AuthorizedService()
+        env.authorize(original, {"read"})
+        assert not hasattr(original, "_AuthorizedObject__allowed")
+        assert original.read() == "read"
+
+    def test_sync_and_async_consistency(self, run_async_fn):
+        template = (
+            "{% if mode == 'read' %}{{ service.read() }}"
+            "{% elif mode == 'aread' %}{{ service.aread() }}"
+            "{% elif mode == 'secret' %}{{ service._secret() }}"
+            "{% elif mode == 'danger' %}{{ service.danger() }}"
+            "{% endif %}"
+        )
+
+        # A sync method works when rendered synchronously in both
+        # environment types (render() runs the async loop if needed).
+        for env in (SandboxedEnvironment(), SandboxedEnvironment(enable_async=True)):
+            service = env.authorize(AuthorizedService(), {"read", "aread"})
+            t = env.from_string(template)
+            assert t.render(service=service, mode="read") == "read"
+            with pytest.raises(SecurityError):
+                t.render(service=service, mode="secret")
+            with pytest.raises(SecurityError):
+                t.render(service=service, mode="danger")
+
+        # Async rendering awaits async methods and rejects the rest.
+        async def check_async():
+            env = SandboxedEnvironment(enable_async=True)
+            service = env.authorize(AuthorizedService(), {"read", "aread"})
+            t = env.from_string(template)
+            rv = []
+            rv.append(await t.render_async(service=service, mode="read"))
+            rv.append(await t.render_async(service=service, mode="aread"))
+            with pytest.raises(SecurityError):
+                await t.render_async(service=service, mode="secret")
+            with pytest.raises(SecurityError):
+                await t.render_async(service=service, mode="danger")
+            return rv
+
+        assert run_async_fn(check_async) == ["read", "async read"]
+
+
 class TestStringFormat:
     def test_basic_format_safety(self):
         env = SandboxedEnvironment()

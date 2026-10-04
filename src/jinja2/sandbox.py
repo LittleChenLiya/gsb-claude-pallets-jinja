@@ -174,6 +174,105 @@ def modifies_known_mutable(obj: t.Any, attr: str) -> bool:
     return False
 
 
+class _AuthorizedMethod:
+    """Proxy for a single method of an :class:`_AuthorizedObject`.
+
+    The proxy is returned when an authorized attribute is accessed on an
+    authorized object.  It never exposes the original bound method and
+    re-checks the allow set as well as the sandbox's callable safety on
+    every call, so revoking the permission takes effect immediately, even
+    if the method was extracted from the object earlier.
+    """
+
+    def __init__(
+        self,
+        env: "SandboxedEnvironment",
+        obj: t.Any,
+        name: str,
+        allowed: set[str],
+    ) -> None:
+        self._env = env
+        self._obj = obj
+        self._name = name
+        self._allowed = allowed
+
+    def _check(self) -> t.Any:
+        """Re-check the authorization and sandbox limits, then return
+        the original bound method to call.
+        """
+        if self._name not in self._allowed:
+            raise SecurityError(
+                f"call to method {self._name!r} of"
+                f" {type(self._obj).__name__!r} object is not permitted;"
+                f" the authorization was revoked."
+            )
+
+        method = getattr(self._obj, self._name)
+
+        if not self._env.is_safe_callable(method):
+            raise SecurityError(f"{method!r} is not safely callable")
+
+        return method
+
+    def __call__(self, *args: t.Any, **kwargs: t.Any) -> t.Any:
+        return self._check()(*args, **kwargs)
+
+
+class _AuthorizedObject:
+    """Proxy wrapping an object so that only the explicitly authorized
+    attributes are accessible from sandboxed templates.
+
+    Access to any other attribute, including private and internal
+    attributes, raises a :exc:`SecurityError`.  Callable attributes are
+    wrapped in an :class:`_AuthorizedMethod` instead of exposing the
+    original bound method.
+    """
+
+    def __init__(
+        self, env: "SandboxedEnvironment", obj: t.Any, allowed: set[str]
+    ) -> None:
+        self._env = env
+        self._obj = obj
+        self._allowed = allowed
+
+    def __getattr__(self, name: str) -> t.Any:
+        # __getattr__ is only called for names not found on the proxy
+        # itself, so the private attributes of the proxy stay hidden.
+        # Access the internals via object.__getattribute__ so that this
+        # method does not recurse through itself when the instance state
+        # has not been restored yet (e.g. during copy or pickle).
+        try:
+            obj = object.__getattribute__(self, "_obj")
+            allowed = object.__getattribute__(self, "_allowed")
+            env = object.__getattribute__(self, "_env")
+        except AttributeError:
+            raise AttributeError(name) from None
+
+        # Dunder attributes are Python internals rather than template
+        # data.  Raise AttributeError so that copy/pickle as well as the
+        # sandbox's normal attribute handling keep working; the sandbox
+        # still blocks access to them just like for any other object.
+        if name.startswith("__"):
+            raise AttributeError(name)
+
+        if name not in allowed:
+            raise SecurityError(
+                f"access to attribute {name!r} of"
+                f" {type(obj).__name__!r} object is not permitted;"
+                f" only {sorted(allowed)!r} are authorized."
+            )
+
+        value = getattr(obj, name)
+
+        if callable(value):
+            return _AuthorizedMethod(env, obj, name, allowed)
+
+        return value
+
+    def __repr__(self) -> str:
+        return f"<authorized {self._obj!r}>"
+
+
 class SandboxedEnvironment(Environment):
     """The sandboxed environment.  It works like the regular environment but
     tells the compiler to generate sandboxed code.  Additionally subclasses of
@@ -244,6 +343,62 @@ class SandboxedEnvironment(Environment):
         self.globals["range"] = safe_range
         self.binop_table = self.default_binop_table.copy()
         self.unop_table = self.default_unop_table.copy()
+
+    def authorize(self, obj: t.Any, allowed: set[str] | t.Iterable[str]) -> t.Any:
+        """Create a proxy around *obj* that only exposes the attributes
+        listed in *allowed* to sandboxed templates.
+
+        This is useful when an object should be passed to a template but
+        only a few of its methods are safe to call.  The original object
+        is not modified; the proxy wraps it and intercepts all attribute
+        access.
+
+        :param obj: the object to wrap.
+        :param allowed: a set of attribute names that may be accessed.
+            If a :class:`set` is passed, it is used directly, so the
+            permissions can be updated (and revoked) after the proxy was
+            created.  Any other iterable is copied into a new set.
+
+        .. code-block:: python
+
+            >>> from jinja2.sandbox import SandboxedEnvironment
+            >>> env = SandboxedEnvironment()
+            >>> class Service:
+            ...     def read(self):
+            ...         return "read"
+            ...     def write(self):
+            ...         return "write"
+            >>> permissions = {"read"}
+            >>> service = env.authorize(Service(), permissions)
+            >>> env.from_string("{{ service.read() }}").render(service=service)
+            'read'
+            >>> env.from_string("{{ service.write() }}").render(service=service)
+            Traceback (most recent call last):
+              ...
+            SecurityError: access to attribute 'write' of 'Service' object is not
+                permitted; only ['read'] are authorized.
+
+        Revoking a permission takes effect immediately, even for methods
+        that were extracted from the proxy before:
+
+        .. code-block:: python
+
+            >>> permissions.remove("read")
+            >>> env.from_string("{{ service.read() }}").render(service=service)
+            Traceback (most recent call last):
+              ...
+            SecurityError: call to method 'read' of 'Service' object is not
+                permitted; the authorization was revoked.
+
+        The sandbox's normal safety checks still apply to the wrapped
+        object.  Methods marked with :func:`unsafe` (or with
+        ``alters_data``) cannot be called even if they are listed in
+        *allowed*.  Sync and async rendering behave identically.
+        """
+        if not isinstance(allowed, set):
+            allowed = set(allowed)
+
+        return _AuthorizedObject(self, obj, allowed)
 
     def is_safe_attribute(self, obj: t.Any, attr: str, value: t.Any) -> bool:
         """The sandboxed environment will call this method to check if the
@@ -394,6 +549,12 @@ class SandboxedEnvironment(Environment):
 
         # the double prefixes are to avoid double keyword argument
         # errors when proxying the call.
+        if isinstance(__obj, _AuthorizedMethod):
+            # Re-check the authorization and sandbox limits on every
+            # call, then let the context call the original method so
+            # that pass_context and async calls are handled as usual.
+            return __context.call(__obj._check(), *args, **kwargs)
+
         if not __self.is_safe_callable(__obj):
             raise SecurityError(f"{__obj!r} is not safely callable")
         return __context.call(__obj, *args, **kwargs)
