@@ -13,6 +13,11 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Add the ``jinja2.macro_contract`` module, which extracts macro
+    contracts (parameter order, default expression positions, special
+    ``caller`` / ``kwargs`` / ``varargs`` usage, dynamic includes) from
+    template source without compiling or executing anything. It can
+    also print a report via ``python -m jinja2.macro_contract``.
 
 
 Version 3.1.6

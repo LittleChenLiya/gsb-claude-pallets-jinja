@@ -917,3 +917,48 @@ returned by the :meth:`Environment.parse` method.
 .. autofunction:: jinja2.meta.find_undeclared_variables
 
 .. autofunction:: jinja2.meta.find_referenced_templates
+
+.. _macro-contract-api:
+
+The Macro Contract API
+----------------------
+
+.. module:: jinja2.macro_contract
+
+The macro contract API inspects a template *read-only*: it parses the
+source without compiling or rendering it and reports the contract of
+every macro declared in the template.  This is useful for documentation
+tools that need to describe macros without executing anything.
+
+-   Macro names, nesting scopes, and parameters are reported in
+    declaration order.  Nested macros and macros that share a name keep
+    their own scope and appear as separate entries.
+-   Default expressions are **never evaluated**.  Only their source
+    position (line and column of the expression itself, not of the
+    whole ``{% macro %}`` tag) and their source text are reported.
+-   Macros that read ``kwargs`` or ``varargs`` are flagged as accepting
+    extra keyword or positional arguments, following the same rules the
+    compiler uses.  Whether a macro receives the special ``caller``
+    parameter is reported as well.
+-   Dynamic ``{% include %}`` tags are only flagged as unknown; the
+    referenced templates are neither loaded nor inferred.
+
+.. autofunction:: jinja2.macro_contract.extract_macro_contracts
+
+.. autofunction:: jinja2.macro_contract.format_report
+
+.. autoclass:: jinja2.macro_contract.TemplateContract
+    :members:
+
+.. autoclass:: jinja2.macro_contract.MacroContract
+    :members:
+
+.. autoclass:: jinja2.macro_contract.MacroParameter
+    :members:
+
+.. autoclass:: jinja2.macro_contract.IncludeInfo
+    :members:
+
+A human-readable report can also be printed from the command line::
+
+    python -m jinja2.macro_contract path/to/template.html
