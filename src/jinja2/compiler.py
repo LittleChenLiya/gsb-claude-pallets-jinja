@@ -1069,7 +1069,7 @@ class CodeGenerator(NodeVisitor):
             self.writeline(
                 f"gen = template.root_render_func("
                 "template.new_context(context.get_all(), True,"
-                f" {self.dump_local_context(frame)}))"
+                f" {self.dump_local_context(frame)}, context.loop_budget))"
             )
             self.writeline("try:")
             self.indent()
@@ -1101,10 +1101,14 @@ class CodeGenerator(NodeVisitor):
         if node.with_context:
             f_name = f"make_module{self.choose_async('_async')}"
             self.write(
-                f"{f_name}(context.get_all(), True, {self.dump_local_context(frame)})"
+                f"{f_name}(context.get_all(), True, {self.dump_local_context(frame)},"
+                " context.loop_budget)"
             )
         else:
-            self.write(f"_get_default_module{self.choose_async('_async')}(context)")
+            self.write(
+                f"_get_default_module{self.choose_async('_async')}"
+                "(context, context.loop_budget)"
+            )
 
     def visit_Import(self, node: nodes.Import, frame: Frame) -> None:
         """Visit regular imports."""
@@ -1171,6 +1175,40 @@ class CodeGenerator(NodeVisitor):
                 self.writeline(
                     f"context.exported_vars.difference_update(({names_str}))"
                 )
+
+    def _emit_loop_iterable(
+        self, node: nodes.For, frame: Frame, extended_loop: bool
+    ) -> None:
+        """Emit the underlying iterable for a ``for`` loop.
+
+        When the environment has a loop budget configured, the iterable is
+        wrapped in ``loop_budget_iter`` so that the per-render budget is
+        checked before each element is fetched.  The iterable is never
+        materialized into a list.
+        """
+        budget = getattr(self.environment, "loop_budget", None)
+
+        if budget is None:
+            budget = self.environment.policies.get("ext.loop_budget.max")
+
+        # Non-extended async loops use ``async for``, so wrap the iterable in
+        # ``auto_aiter``.  This is done regardless of the budget.
+        if self.environment.is_async and not extended_loop:
+            self.write("auto_aiter(")
+
+        if budget is not None:
+            self.write("loop_budget_iter(context, ")
+
+        if node.recursive:
+            self.write("reciter")
+        else:
+            self.visit(node.iter, frame)
+
+        if budget is not None:
+            self.write(f", {node.lineno})")
+
+        if self.environment.is_async and not extended_loop:
+            self.write(")")
 
     def visit_For(self, node: nodes.For, frame: Frame) -> None:
         loop_frame = frame.inner()
@@ -1255,14 +1293,7 @@ class CodeGenerator(NodeVisitor):
 
         if node.test:
             self.write(f"{loop_filter_func}(")
-        if node.recursive:
-            self.write("reciter")
-        else:
-            if self.environment.is_async and not extended_loop:
-                self.write("auto_aiter(")
-            self.visit(node.iter, frame)
-            if self.environment.is_async and not extended_loop:
-                self.write(")")
+        self._emit_loop_iterable(node, frame, extended_loop)
         if node.test:
             self.write(")")
 

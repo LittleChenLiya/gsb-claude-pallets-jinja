@@ -150,6 +150,24 @@ class TemplateRuntimeError(TemplateError):
     """
 
 
+class LoopBudgetExceeded(TemplateRuntimeError):
+    """Raised when a loop would fetch more elements than the configured
+    loop budget allows for a single render.
+
+    The exception carries the name of the template and the line number of
+    the ``for`` statement that would have exceeded the budget.
+    """
+
+    def __init__(self, budget: int, name: str | None, lineno: int) -> None:
+        self.budget = budget
+        self.name = name
+        self.lineno = lineno
+        super().__init__(
+            f"Loop budget of {budget} exceeded in template {name!r}"
+            f" at line {lineno}."
+        )
+
+
 class UndefinedError(TemplateRuntimeError):
     """Raised if a template tries to operate on :class:`Undefined`."""
 

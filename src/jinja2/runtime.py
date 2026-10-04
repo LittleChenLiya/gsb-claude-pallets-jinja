@@ -12,6 +12,7 @@ from markupsafe import soft_str
 
 from .async_utils import auto_aiter
 from .async_utils import auto_await  # noqa: F401
+from .exceptions import LoopBudgetExceeded
 from .exceptions import TemplateNotFound  # noqa: F401
 from .exceptions import TemplateRuntimeError  # noqa: F401
 from .exceptions import UndefinedError
@@ -50,6 +51,8 @@ exported = [
     "Macro",
     "Markup",
     "TemplateRuntimeError",
+    "LoopBudgetExceeded",
+    "loop_budget_iter",
     "missing",
     "escape",
     "markup_join",
@@ -90,6 +93,81 @@ def str_join(seq: t.Iterable[t.Any]) -> str:
     return concat(map(str, seq))
 
 
+class LoopBudget:
+    """Per-render counter for the number of elements fetched by ``for``
+    loops.
+
+    One instance is created for each render (each root context) and shared
+    with any contexts created for includes, imports and derived contexts
+    within the same render.  It is discarded once the render finishes or
+    fails, so every render starts with a fresh quota.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.count = 0
+
+    def check(self, name: str | None, lineno: int) -> None:
+        """Check the budget before the fetched element is consumed.
+
+        Raises :class:`LoopBudgetExceeded` if the next fetch would exceed
+        the budget.  This is called after the element has been fetched but
+        before it is handed to the loop body, so the element is not consumed
+        when the budget is exhausted and no further fetch is attempted.
+        """
+        if self.count >= self.limit:
+            raise LoopBudgetExceeded(self.limit, name, lineno)
+
+        self.count += 1
+
+
+class _LoopBudgetIterator:
+    """Lazily wrap an iterable so that the per-render loop budget is
+    checked before each element is fetched.
+
+    The iterable is never materialized into a list; elements are fetched
+    one at a time through the budget check.
+    """
+
+    def __init__(
+        self, context: "Context", iterable: t.Iterable[V], lineno: int
+    ) -> None:
+        self._context = context
+        self._iterator = iter(iterable)
+        self._lineno = lineno
+
+    def __iter__(self) -> "_LoopBudgetIterator":
+        return self
+
+    def __next__(self) -> V:
+        # Fetch the next element first.  If the underlying iterable is
+        # exhausted, ``next`` raises ``StopIteration`` and the for loop ends
+        # without a budget check -- the exhaustion check is not a fetch.
+        item = next(self._iterator)
+
+        # Check the budget before the element is handed to the loop body.
+        # If the budget is exhausted, the element has been fetched but is not
+        # consumed, and no further fetch is attempted.
+        budget = self._context.loop_budget
+
+        if budget is not None:
+            budget.check(self._context.name, self._lineno)
+
+        return item
+
+
+def loop_budget_iter(
+    context: "Context", iterable: t.Iterable[V], lineno: int
+) -> "_LoopBudgetIterator[V]":
+    """Wrap an iterable so that the per-render loop budget is enforced
+    before each element is fetched.
+
+    This is used by the compiled template code for every ``for`` loop when
+    the environment has a loop budget configured.
+    """
+    return _LoopBudgetIterator(context, iterable, lineno)
+
+
 def new_context(
     environment: "Environment",
     template_name: str | None,
@@ -98,6 +176,7 @@ def new_context(
     shared: bool = False,
     globals: t.MutableMapping[str, t.Any] | None = None,
     locals: t.Mapping[str, t.Any] | None = None,
+    loop_budget: "LoopBudget | None" = None,
 ) -> "Context":
     """Internal helper for context creation."""
     if vars is None:
@@ -115,7 +194,12 @@ def new_context(
             if value is not missing:
                 parent[key] = value
     return environment.context_class(
-        environment, parent, template_name, blocks, globals=globals
+        environment,
+        parent,
+        template_name,
+        blocks,
+        globals=globals,
+        loop_budget=loop_budget,
     )
 
 
@@ -169,6 +253,7 @@ class Context:
         name: str | None,
         blocks: dict[str, t.Callable[["Context"], t.Iterator[str]]],
         globals: t.MutableMapping[str, t.Any] | None = None,
+        loop_budget: "LoopBudget | None" = None,
     ):
         self.parent = parent
         self.vars: dict[str, t.Any] = {}
@@ -182,6 +267,18 @@ class Context:
         # takes place the runtime will update this mapping with the new blocks
         # from the template.
         self.blocks = {k: [v] for k, v in blocks.items()}
+
+        # Per-render loop budget.  A root context gets a fresh budget from the
+        # environment's configured limit; contexts created for includes,
+        # imports and derived contexts within the same render share the
+        # budget passed in.  It is discarded after the render.
+        if loop_budget is None:
+            limit = getattr(environment, "loop_budget", None)
+            if limit is None:
+                limit = environment.policies.get("ext.loop_budget.max")
+            self.loop_budget = LoopBudget(limit) if limit is not None else None
+        else:
+            self.loop_budget = loop_budget
 
     def super(
         self, name: str, current: t.Callable[["Context"], t.Iterator[str]]
@@ -313,7 +410,14 @@ class Context:
         template that is independent.
         """
         context = new_context(
-            self.environment, self.name, {}, self.get_all(), True, None, locals
+            self.environment,
+            self.name,
+            {},
+            self.get_all(),
+            True,
+            None,
+            locals,
+            self.loop_budget,
         )
         context.eval_ctx = self.eval_ctx
         context.blocks.update((k, list(v)) for k, v in self.blocks.items())

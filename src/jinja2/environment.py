@@ -316,6 +316,7 @@ class Environment:
         auto_reload: bool = True,
         bytecode_cache: t.Optional["BytecodeCache"] = None,
         enable_async: bool = False,
+        loop_budget: int | None = None,
     ):
         # !!Important notice!!
         #   The constructor accepts quite a few arguments that should be
@@ -364,6 +365,10 @@ class Environment:
 
         # load extensions
         self.extensions = load_extensions(self, extensions)
+
+        # Maximum number of elements all for loops may fetch in a single
+        # render.  None disables the budget and keeps the original behavior.
+        self.loop_budget = loop_budget
 
         self.is_async = enable_async
         _environment_config_check(self)
@@ -1371,6 +1376,7 @@ class Template:
         vars: dict[str, t.Any] | None = None,
         shared: bool = False,
         locals: t.Mapping[str, t.Any] | None = None,
+        loop_budget: t.Any = None,
     ) -> Context:
         """Create a new :class:`Context` for this template.  The vars
         provided will be passed to the template.  Per default the globals
@@ -1378,9 +1384,21 @@ class Template:
         is passed as is to the context without adding the globals.
 
         `locals` can be a dict of local variables for internal usage.
+
+        `loop_budget` is the per-render :class:`~jinja2.runtime.LoopBudget`
+        to share with contexts created for includes, imports and derived
+        contexts within the same render.  When ``None`` a fresh budget is
+        created from the environment's configured limit.
         """
         return new_context(
-            self.environment, self.name, self.blocks, vars, shared, self.globals, locals
+            self.environment,
+            self.name,
+            self.blocks,
+            vars,
+            shared,
+            self.globals,
+            locals,
+            loop_budget,
         )
 
     def make_module(
@@ -1388,6 +1406,7 @@ class Template:
         vars: dict[str, t.Any] | None = None,
         shared: bool = False,
         locals: t.Mapping[str, t.Any] | None = None,
+        loop_budget: t.Any = None,
     ) -> "TemplateModule":
         """This method works like the :attr:`module` attribute when called
         without arguments but it will evaluate the template on every call
@@ -1395,7 +1414,7 @@ class Template:
         a dict which is then used as context.  The arguments are the same
         as for the :meth:`new_context` method.
         """
-        ctx = self.new_context(vars, shared, locals)
+        ctx = self.new_context(vars, shared, locals, loop_budget)
         return TemplateModule(self, ctx)
 
     async def make_module_async(
@@ -1403,13 +1422,14 @@ class Template:
         vars: dict[str, t.Any] | None = None,
         shared: bool = False,
         locals: t.Mapping[str, t.Any] | None = None,
+        loop_budget: t.Any = None,
     ) -> "TemplateModule":
         """As template module creation can invoke template code for
         asynchronous executions this method must be used instead of the
         normal :meth:`make_module` one.  Likewise the module attribute
         becomes unavailable in async mode.
         """
-        ctx = self.new_context(vars, shared, locals)
+        ctx = self.new_context(vars, shared, locals, loop_budget)
         return TemplateModule(
             self,
             ctx,
@@ -1417,7 +1437,9 @@ class Template:
         )
 
     @internalcode
-    def _get_default_module(self, ctx: Context | None = None) -> "TemplateModule":
+    def _get_default_module(
+        self, ctx: Context | None = None, loop_budget: t.Any = None
+    ) -> "TemplateModule":
         """If a context is passed in, this means that the template was
         imported. Imported templates have access to the current
         template's globals by default, but they can only be accessed via
@@ -1436,7 +1458,9 @@ class Template:
             keys = ctx.globals_keys - self.globals.keys()
 
             if keys:
-                return self.make_module({k: ctx.parent[k] for k in keys})
+                return self.make_module(
+                    {k: ctx.parent[k] for k in keys}, loop_budget=loop_budget
+                )
 
         if self._module is None:
             self._module = self.make_module()
@@ -1444,13 +1468,15 @@ class Template:
         return self._module
 
     async def _get_default_module_async(
-        self, ctx: Context | None = None
+        self, ctx: Context | None = None, loop_budget: t.Any = None
     ) -> "TemplateModule":
         if ctx is not None:
             keys = ctx.globals_keys - self.globals.keys()
 
             if keys:
-                return await self.make_module_async({k: ctx.parent[k] for k in keys})
+                return await self.make_module_async(
+                    {k: ctx.parent[k] for k in keys}, loop_budget=loop_budget
+                )
 
         if self._module is None:
             self._module = await self.make_module_async()

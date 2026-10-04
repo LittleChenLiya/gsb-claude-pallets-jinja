@@ -258,6 +258,85 @@ available filters and tests. This is useful to see what's available to
 use in the template without setting up a debugger.
 
 
+.. _loopbudget-extension:
+
+Loop Budget Extension
+---------------------
+
+**Import name:** ``jinja2.ext.loopbudget``
+
+The loop budget extension limits the total number of elements that all
+``for`` loops may fetch in a single render.  This is useful to prevent
+runaway templates from consuming unbounded resources.  Nested loops share
+the same budget, and loops inside includes and macros also count toward
+the same render budget.
+
+The budget check happens before the element is consumed by the loop body,
+and the underlying iterable is never materialized into a list -- elements
+are fetched one at a time through the budget check.  When the budget is
+exhausted, :class:`~jinja2.LoopBudgetExceeded` is raised with the template
+name and the line number of the ``for`` statement that exceeded the budget.
+
+A new budget is created for every render, so consecutive renders start with
+a fresh quota.  Environments without the extension (or with a budget of
+``None``) keep the original behavior.
+
+Configuration
+~~~~~~~~~~~~~
+
+Enable the extension and configure the maximum number of elements with the
+``ext.loop_budget.max`` policy::
+
+    from jinja2 import Environment
+    from jinja2.ext import LoopBudgetExtension
+
+    env = Environment(extensions=[LoopBudgetExtension])
+    env.policies["ext.loop_budget.max"] = 1000
+
+Alternatively, set the ``loop_budget`` attribute directly on the
+environment::
+
+    env = Environment(extensions=[LoopBudgetExtension])
+    env.loop_budget = 1000
+
+If both are set, the ``loop_budget`` attribute takes precedence.
+
+Example
+~~~~~~~
+
+The following environment limits all ``for`` loops combined to 10 elements
+per render::
+
+    env = Environment(
+        loader=DictLoader({"tmpl.html": "..."}),
+        extensions=[LoopBudgetExtension],
+    )
+    env.loop_budget = 10
+
+A template with two nested loops that fetch a total of 10 elements
+completes successfully::
+
+    {# 2 outer x 5 inner = 10 elements #}
+    {% for i in outer %}{% for j in inner %}{{ i }}-{{ j }}{% endfor %}{% endfor %}
+
+If the same template fetches 11 elements, the render fails with
+``Loop budget of 10 exceeded in template 'tmpl.html' at line 1.``.
+
+Loops in included templates and macros count toward the same budget.  For
+example, if the main template includes another template with a loop, the
+elements fetched by the included loop are deducted from the same budget::
+
+    {# main.html #}
+    {% include "inc.html" %}
+
+    {# inc.html #}
+    {% for i in items %}{{ i }}{% endfor %}
+
+The exception carries the template name and line number of the ``for``
+statement that exceeded the budget, making it easy to identify which loop
+caused the failure.
+
+
 .. _writing-extensions:
 
 Writing Extensions

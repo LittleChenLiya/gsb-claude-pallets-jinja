@@ -584,6 +584,13 @@ Example::
     :ref:`i18n-extension` will always unify linebreaks and surrounding
     whitespace as if the `trimmed` modifier was used.
 
+``ext.loop_budget.max``:
+    The maximum number of elements that all ``for`` loops may fetch in a
+    single render when the :ref:`loop budget extension <loopbudget-extension>`
+    is enabled.  Nested loops, as well as loops inside includes and macros,
+    share the same budget.  When the budget is exhausted,
+    :class:`~jinja2.LoopBudgetExceeded` is raised.
+
 
 Utilities
 ---------
@@ -633,6 +640,22 @@ Exceptions
         file system (most likely utf-8, or mbcs on Windows systems).
 
 .. autoexception:: jinja2.TemplateRuntimeError
+
+.. autoexception:: jinja2.LoopBudgetExceeded
+
+    .. attribute:: budget
+
+        The configured loop budget that was exceeded.
+
+    .. attribute:: name
+
+        The load name of the template that contains the ``for`` statement
+        which exceeded the budget.  ``None`` if the template was not loaded
+        from the file system.
+
+    .. attribute:: lineno
+
+        The line number of the ``for`` statement that exceeded the budget.
 
 .. autoexception:: jinja2.TemplateAssertionError
 

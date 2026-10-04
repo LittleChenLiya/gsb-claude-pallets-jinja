@@ -632,6 +632,41 @@ class DebugExtension(Extension):
         return pprint.pformat(result, depth=3, compact=True)
 
 
+class LoopBudgetExtension(Extension):
+    """Extension that enables a per-render budget on the number of
+    elements that all ``for`` loops may fetch.
+
+    Nested loops, as well as loops inside includes and macros, share the
+    same budget for a single render.  The check happens before the next
+    element is fetched, and the underlying iterable is never materialized
+    into a list.  When the budget is exhausted,
+    :class:`~jinja2.LoopBudgetExceeded` is raised with the template name
+    and the line number of the ``for`` statement.
+
+    Configure the maximum number of elements with the ``ext.loop_budget.max``
+    policy::
+
+        env = Environment(extensions=[LoopBudgetExtension])
+        env.policies["ext.loop_budget.max"] = 7
+
+    Alternatively, set the ``loop_budget`` attribute directly on the
+    environment::
+
+        env = Environment(extensions=[LoopBudgetExtension])
+        env.loop_budget = 7
+
+    A new budget is created for every render, so consecutive renders start
+    with a fresh quota.  Environments without the extension (or with a
+    budget of ``None``) keep the original behavior.
+    """
+
+    def __init__(self, environment: Environment) -> None:
+        super().__init__(environment)
+        budget = environment.policies.get("ext.loop_budget.max")
+        if budget is not None:
+            environment.loop_budget = budget
+
+
 def extract_from_ast(
     ast: nodes.Template,
     gettext_functions: t.Sequence[str] = GETTEXT_FUNCTIONS,
@@ -842,3 +877,4 @@ i18n = InternationalizationExtension
 do = ExprStmtExtension
 loopcontrols = LoopControlExtension
 debug = DebugExtension
+loopbudget = LoopBudgetExtension
