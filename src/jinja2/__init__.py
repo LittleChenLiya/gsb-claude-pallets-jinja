@@ -10,6 +10,10 @@ import typing as t
 from .bccache import BytecodeCache as BytecodeCache
 from .bccache import FileSystemBytecodeCache as FileSystemBytecodeCache
 from .bccache import MemcachedBytecodeCache as MemcachedBytecodeCache
+from .blocktrace import BlockEvent as BlockEvent
+from .blocktrace import BlockTrace as BlockTrace
+from .blocktrace import render_with_trace as render_with_trace
+from .blocktrace import render_with_trace_async as render_with_trace_async
 from .environment import Environment as Environment
 from .environment import Template as Template
 from .exceptions import TemplateAssertionError as TemplateAssertionError

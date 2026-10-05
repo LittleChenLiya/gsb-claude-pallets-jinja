@@ -12,6 +12,8 @@ from markupsafe import soft_str
 
 from .async_utils import auto_aiter
 from .async_utils import auto_await  # noqa: F401
+from .blocktrace import current_trace as _current_block_trace
+from .blocktrace import record_super as _record_block_super
 from .exceptions import TemplateNotFound  # noqa: F401
 from .exceptions import TemplateRuntimeError  # noqa: F401
 from .exceptions import UndefinedError
@@ -114,9 +116,21 @@ def new_context(
         for key, value in locals.items():
             if value is not missing:
                 parent[key] = value
-    return environment.context_class(
+    context = environment.context_class(
         environment, parent, template_name, blocks, globals=globals
     )
+
+    # If a block trace is bound to the current render, wrap the
+    # render-local block stacks so block execution is recorded.  This
+    # also covers the independent contexts created for {% include %},
+    # which keep their own template source in the trace.  When no trace
+    # is active this is a no-op and rendering is unchanged.
+    trace = _current_block_trace()
+
+    if trace is not None:
+        context.blocks = trace.install(context.blocks)
+
+    return context
 
 
 class TemplateReference:
@@ -195,6 +209,7 @@ class Context:
             return self.environment.undefined(
                 f"there is no parent block called {name!r}.", name="super"
             )
+        _record_block_super(self, name, blocks, index)
         return BlockReference(name, self, blocks, index)
 
     def get(self, key: str, default: t.Any = None) -> t.Any:
@@ -363,6 +378,7 @@ class BlockReference:
             return self._context.environment.undefined(
                 f"there is no parent block called {self.name!r}.", name="super"
             )
+        _record_block_super(self._context, self.name, self._stack, self._depth + 1)
         return BlockReference(self.name, self._context, self._stack, self._depth + 1)
 
     @internalcode

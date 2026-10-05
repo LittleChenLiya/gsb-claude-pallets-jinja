@@ -13,6 +13,12 @@ Unreleased
 -   Use modern packaging metadata with ``pyproject.toml`` instead of ``setup.cfg``.
     :pr:`1793`
 -   Use ``flit_core`` instead of ``setuptools`` as build backend.
+-   Add opt-in block execution tracing in ``jinja2.blocktrace``.
+    ``render_with_trace`` and ``render_with_trace_async`` render a
+    template once and return the output together with a ``BlockTrace``
+    recording which template's block implementations were actually
+    entered and which parent implementation each ``super()`` selected.
+    Default rendering is unchanged.
 
 
 Version 3.1.6
