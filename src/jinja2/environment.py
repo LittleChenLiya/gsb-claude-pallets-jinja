@@ -61,6 +61,7 @@ if t.TYPE_CHECKING:
     from .bccache import BytecodeCache
     from .ext import Extension
     from .loaders import BaseLoader
+    from .runtime import BlockTrace
 
 _env_bound = t.TypeVar("_env_bound", bound="Environment")
 
@@ -316,6 +317,7 @@ class Environment:
         auto_reload: bool = True,
         bytecode_cache: t.Optional["BytecodeCache"] = None,
         enable_async: bool = False,
+        enable_block_trace: bool = False,
     ):
         # !!Important notice!!
         #   The constructor accepts quite a few arguments that should be
@@ -366,6 +368,7 @@ class Environment:
         self.extensions = load_extensions(self, extensions)
 
         self.is_async = enable_async
+        self.enable_block_trace = enable_block_trace
         _environment_config_check(self)
 
     def add_extension(self, extension: str | type["Extension"]) -> None:
@@ -1278,13 +1281,21 @@ class Template:
             template.render({'knights': 'that say nih'})
 
         This will return the rendered template as a string.
+
+        If ``block_trace`` is provided it must be a
+        :class:`~jinja2.runtime.BlockTrace` instance.  The block execution
+        trace for this render is recorded on it.
         """
+        block_trace = kwargs.pop("block_trace", None)
+
         if self.environment.is_async:
             import asyncio
 
-            return asyncio.run(self.render_async(*args, **kwargs))
+            return asyncio.run(
+                self.render_async(*args, **kwargs, block_trace=block_trace)
+            )
 
-        ctx = self.new_context(dict(*args, **kwargs))
+        ctx = self.new_context(dict(*args, **kwargs), block_trace=block_trace)
 
         try:
             return self.environment.concat(self.root_render_func(ctx))  # type: ignore
@@ -1300,12 +1311,14 @@ class Template:
 
             await template.render_async(knights='that say nih; asynchronously')
         """
+        block_trace = kwargs.pop("block_trace", None)
+
         if not self.environment.is_async:
             raise RuntimeError(
                 "The environment was not created with async mode enabled."
             )
 
-        ctx = self.new_context(dict(*args, **kwargs))
+        ctx = self.new_context(dict(*args, **kwargs), block_trace=block_trace)
 
         try:
             return self.environment.concat(  # type: ignore
@@ -1328,16 +1341,23 @@ class Template:
 
         It accepts the same arguments as :meth:`render`.
         """
+        block_trace = kwargs.pop("block_trace", None)
+
         if self.environment.is_async:
             import asyncio
 
             async def to_list() -> list[str]:
-                return [x async for x in self.generate_async(*args, **kwargs)]
+                return [
+                    x
+                    async for x in self.generate_async(
+                        *args, **kwargs, block_trace=block_trace
+                    )
+                ]
 
             yield from asyncio.run(to_list())
             return
 
-        ctx = self.new_context(dict(*args, **kwargs))
+        ctx = self.new_context(dict(*args, **kwargs), block_trace=block_trace)
 
         try:
             yield from self.root_render_func(ctx)
@@ -1350,12 +1370,14 @@ class Template:
         """An async version of :meth:`generate`.  Works very similarly but
         returns an async iterator instead.
         """
+        block_trace = kwargs.pop("block_trace", None)
+
         if not self.environment.is_async:
             raise RuntimeError(
                 "The environment was not created with async mode enabled."
             )
 
-        ctx = self.new_context(dict(*args, **kwargs))
+        ctx = self.new_context(dict(*args, **kwargs), block_trace=block_trace)
 
         try:
             agen: t.AsyncGenerator[str, None] = self.root_render_func(ctx)  # type: ignore[assignment]
@@ -1371,6 +1393,7 @@ class Template:
         vars: dict[str, t.Any] | None = None,
         shared: bool = False,
         locals: t.Mapping[str, t.Any] | None = None,
+        block_trace: "BlockTrace | None" = None,
     ) -> Context:
         """Create a new :class:`Context` for this template.  The vars
         provided will be passed to the template.  Per default the globals
@@ -1378,9 +1401,19 @@ class Template:
         is passed as is to the context without adding the globals.
 
         `locals` can be a dict of local variables for internal usage.
+
+        `block_trace` can be a :class:`~jinja2.runtime.BlockTrace` to
+        collect the block execution trace for this render.
         """
         return new_context(
-            self.environment, self.name, self.blocks, vars, shared, self.globals, locals
+            self.environment,
+            self.name,
+            self.blocks,
+            vars,
+            shared,
+            self.globals,
+            locals,
+            block_trace=block_trace,
         )
 
     def make_module(

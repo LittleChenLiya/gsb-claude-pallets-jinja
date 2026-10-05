@@ -112,7 +112,13 @@ def generate(
         raise TypeError("Can't compile non template nodes")
 
     generator = environment.code_generator_class(
-        environment, name, filename, stream, defer_init, optimized
+        environment,
+        name,
+        filename,
+        stream,
+        defer_init,
+        optimized,
+        enable_block_trace=getattr(environment, "enable_block_trace", False),
     )
     generator.visit(node)
 
@@ -304,6 +310,7 @@ class CodeGenerator(NodeVisitor):
         stream: t.TextIO | None = None,
         defer_init: bool = False,
         optimized: bool = True,
+        enable_block_trace: bool = False,
     ) -> None:
         if stream is None:
             stream = StringIO()
@@ -314,6 +321,11 @@ class CodeGenerator(NodeVisitor):
         self.created_block_context = False
         self.defer_init = defer_init
         self.optimizer: Optimizer | None = None
+        # Whether to emit block tracing hooks.  When enabled, each block
+        # function records an enter event and carries a ``_jinja_template``
+        # attribute so that super calls can be traced.  This does not
+        # change the rendered output.
+        self.enable_block_trace = enable_block_trace
 
         if optimized:
             self.optimizer = Optimizer(environment)
@@ -916,6 +928,11 @@ class CodeGenerator(NodeVisitor):
             )
             self.indent()
             self.write_commons()
+            # Emit a block enter trace hook.  This is a no-op when no
+            # BlockTrace is passed to the render call, so the output is
+            # unchanged.
+            if self.enable_block_trace:
+                self.writeline(f"context._jinja_block_enter({self.name!r}, {name!r})")
             # It's important that we do not make this frame a child of the
             # toplevel template.  This would cause a variety of
             # interesting issues with identifier tracking.
@@ -936,6 +953,10 @@ class CodeGenerator(NodeVisitor):
             self.blockvisit(block.body, block_frame)
             self.leave_frame(block_frame, with_python_scope=True)
             self.outdent()
+            # Attach the template name to the block function so that the
+            # trace can record which template a super call selected.
+            if self.enable_block_trace:
+                self.writeline(f"block_{name}._jinja_template = {self.name!r}")
 
         blocks_kv_str = ", ".join(f"{x!r}: block_{x}" for x in self.blocks)
         self.writeline(f"blocks = {{{blocks_kv_str}}}", extra=1)
@@ -1066,10 +1087,17 @@ class CodeGenerator(NodeVisitor):
             self.outdent()
 
         if node.with_context:
+            # Share the per-render block trace with the included context so
+            # that include blocks are recorded in the same trace, but each
+            # event records its own source template.  The included context
+            # is independent (its vars do not leak to the outer context).
+            block_trace_arg = ""
+            if self.enable_block_trace:
+                block_trace_arg = ", block_trace=context._jinja_block_trace"
             self.writeline(
                 f"gen = template.root_render_func("
                 "template.new_context(context.get_all(), True,"
-                f" {self.dump_local_context(frame)}))"
+                f" {self.dump_local_context(frame)}{block_trace_arg}))"
             )
             self.writeline("try:")
             self.indent()

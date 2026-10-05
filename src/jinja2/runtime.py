@@ -43,6 +43,40 @@ if t.TYPE_CHECKING:
         ) -> str: ...
 
 
+class BlockTrace:
+    """Records the execution trace of blocks during a single template
+    render.  The trace is a list of events, each describing a block
+    enter or a super call.
+
+    Events are tuples of the form:
+
+    * ``("enter", template_name, block_name)`` -- a block was entered.
+    * ``("super", current_template, block_name, parent_template)`` --
+      a block called super and selected a parent implementation.
+
+    The trace is per-render and independent.  It is collected during
+    the actual render, so no loader or block is re-run to obtain it.
+    """
+
+    def __init__(self) -> None:
+        self.events: list[tuple[t.Any, ...]] = []
+
+    def record_enter(self, template_name: str | None, block_name: str) -> None:
+        """Record that a block from *template_name* was entered."""
+        self.events.append(("enter", template_name, block_name))
+
+    def record_super(
+        self,
+        current_template: str | None,
+        block_name: str,
+        parent_template: str | None,
+    ) -> None:
+        """Record that *block_name* from *current_template* called super
+        and selected the parent implementation from *parent_template*.
+        """
+        self.events.append(("super", current_template, block_name, parent_template))
+
+
 # these variables are exported to the template runtime
 exported = [
     "LoopContext",
@@ -98,6 +132,7 @@ def new_context(
     shared: bool = False,
     globals: t.MutableMapping[str, t.Any] | None = None,
     locals: t.Mapping[str, t.Any] | None = None,
+    block_trace: "BlockTrace | None" = None,
 ) -> "Context":
     """Internal helper for context creation."""
     if vars is None:
@@ -114,9 +149,11 @@ def new_context(
         for key, value in locals.items():
             if value is not missing:
                 parent[key] = value
-    return environment.context_class(
+    ctx = environment.context_class(
         environment, parent, template_name, blocks, globals=globals
     )
+    ctx._jinja_block_trace = block_trace
+    return ctx
 
 
 class TemplateReference:
@@ -183,6 +220,18 @@ class Context:
         # from the template.
         self.blocks = {k: [v] for k, v in blocks.items()}
 
+        # Per-render block execution trace.  This is ``None`` unless a
+        # :class:`BlockTrace` was passed to the render call.  It is shared
+        # across include contexts so that the trace is unified per render,
+        # but each event records its own source template.
+        self._jinja_block_trace: BlockTrace | None = None
+
+    def _jinja_block_enter(self, template_name: str | None, block_name: str) -> None:
+        """Record a block enter event if tracing is enabled."""
+        trace = self._jinja_block_trace
+        if trace is not None:
+            trace.record_enter(template_name, block_name)
+
     def super(
         self, name: str, current: t.Callable[["Context"], t.Iterator[str]]
     ) -> t.Union["BlockReference", "Undefined"]:
@@ -195,7 +244,12 @@ class Context:
             return self.environment.undefined(
                 f"there is no parent block called {name!r}.", name="super"
             )
-        return BlockReference(name, self, blocks, index)
+        # Pass the current template to the BlockReference so that the
+        # trace can record which template called super.  The actual super
+        # event is recorded in BlockReference.__call__ when the parent
+        # block is rendered.
+        current_template = getattr(current, "_jinja_template", None)
+        return BlockReference(name, self, blocks, index, current_template)
 
     def get(self, key: str, default: t.Any = None) -> t.Any:
         """Look up a variable by name, or return a default if the key is
@@ -317,6 +371,9 @@ class Context:
         )
         context.eval_ctx = self.eval_ctx
         context.blocks.update((k, list(v)) for k, v in self.blocks.items())
+        # Share the per-render trace with the derived context so that
+        # blocks within loops are also traced.
+        context._jinja_block_trace = self._jinja_block_trace
         return context
 
     keys = _dict_method_all(dict.keys)
@@ -350,11 +407,16 @@ class BlockReference:
         context: "Context",
         stack: list[t.Callable[["Context"], t.Iterator[str]]],
         depth: int,
+        current_template: str | None = None,
     ) -> None:
         self.name = name
         self._context = context
         self._stack = stack
         self._depth = depth
+        # The template that is calling super.  This is passed along the
+        # super chain so that the trace can record which template called
+        # super.  It is ``None`` for ``self.block`` references (depth 0).
+        self._current_template = current_template
 
     @property
     def super(self) -> t.Union["BlockReference", "Undefined"]:
@@ -363,10 +425,28 @@ class BlockReference:
             return self._context.environment.undefined(
                 f"there is no parent block called {self.name!r}.", name="super"
             )
-        return BlockReference(self.name, self._context, self._stack, self._depth + 1)
+        return BlockReference(
+            self.name,
+            self._context,
+            self._stack,
+            self._depth + 1,
+            self._current_template,
+        )
+
+    def _record_super(self) -> None:
+        """Record a super call event if tracing is enabled.  This is only
+        called when the depth is greater than zero, i.e. when a parent
+        block is rendered via super.
+        """
+        trace = self._context._jinja_block_trace
+        if trace is not None and self._depth > 0:
+            parent = self._stack[self._depth]
+            parent_template = getattr(parent, "_jinja_template", None)
+            trace.record_super(self._current_template, self.name, parent_template)
 
     @internalcode
     async def _async_call(self) -> str:
+        self._record_super()
         rv = self._context.environment.concat(  # type: ignore
             [x async for x in self._stack[self._depth](self._context)]  # type: ignore
         )
@@ -381,6 +461,7 @@ class BlockReference:
         if self._context.environment.is_async:
             return self._async_call()  # type: ignore
 
+        self._record_super()
         rv = self._context.environment.concat(  # type: ignore
             self._stack[self._depth](self._context)
         )
